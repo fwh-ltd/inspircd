@@ -16,17 +16,18 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/// $PackageInfo: require_system("alpine") pkgconf rapidjson-dev
-/// $PackageInfo: require_system("arch") pkgconf rapidjson
-/// $PackageInfo: require_system("darwin") pkg-config rapidjson
-/// $PackageInfo: require_system("debian~") rapidjson-dev pkg-config
+/// $PackageInfo: require_system("alpine") pkgconf nlohmann-json
+/// $PackageInfo: require_system("arch") pkgconf nlohmann-json
+/// $PackageInfo: require_system("darwin") pkg-config nlohmann-json
+/// $PackageInfo: require_system("debian~") nlohmann-json3-dev pkg-config
 
 #include "inspircd.h"
 #include "modules/hash.h"
 
-#include <rapidjson/document.h>
-#include <rapidjson/stringbuffer.h>
-#include <rapidjson/writer.h>
+#include <nlohmann/json.hpp>
+#include <sstream>
+
+using json = nlohmann::json;
 
 class ModuleGecosJSON final
 	: public Module
@@ -88,7 +89,7 @@ private:
 		return expected == ident;
 	}
 
-	bool VerifyRealnameHash(LocalUser* user, const rapidjson::Document& doc) const
+	bool VerifyRealnameHash(LocalUser* user, const json& j) const
 	{
 		// Check if username matches pattern (e.g., "kiwi-user")
 		const std::string ident = user->GetDisplayedUser();
@@ -96,20 +97,13 @@ private:
 			return true; // Username doesn't match, skip verification
 
 		// Check if hash key exists in JSON
-		if (!doc.HasMember(hashKey.c_str()))
+		if (!j.contains(hashKey))
 		{
 			ServerInstance->Logs.Normal(MODNAME, "Realname JSON missing hash key '{}' for user {} ({})", hashKey, user->nick, user->GetAddress());
 			return false;
 		}
 
-		const rapidjson::Value& field = doc[hashKey.c_str()];
-		if (!field.IsString())
-		{
-			ServerInstance->Logs.Normal(MODNAME, "Realname JSON hash key '{}' is not a string for user {} ({})", hashKey, user->nick, user->GetAddress());
-			return false;
-		}
-
-		const std::string jsonHash = field.GetString();
+		std::string jsonHash = j[hashKey].get<std::string>();
 		std::string expectedHash = GenerateHash(user->GetAddress());
 
 		ServerInstance->Logs.Normal(MODNAME, "Verify: user={} ip={} jsonHash={} expectedHash={} match={}",
@@ -186,10 +180,18 @@ public:
 			user->nick, user->GetDisplayedUser(), realname, mode);
 
 		// Try to parse realname as JSON
-		rapidjson::Document doc;
+		json j;
 		bool isJson = false;
-		if (!realname.empty() && !doc.Parse(realname.c_str()).HasParseError() && doc.IsObject())
-			isJson = true;
+		try
+		{
+			j = json::parse(realname);
+			isJson = j.is_object();
+		}
+		catch (const json::exception&)
+		{
+			// Not valid JSON
+			isJson = false;
+		}
 
 		// Verify based on mode
 		bool verified = true;
@@ -204,7 +206,7 @@ public:
 
 		if ((mode == "realname" || mode == "both" || mode == "off") && !salt.empty() && isJson)
 		{
-			bool realnameVerified = VerifyRealnameHash(user, doc);
+			bool realnameVerified = VerifyRealnameHash(user, j);
 			if (mode != "off")
 			{
 				verified = verified && realnameVerified;
@@ -241,30 +243,29 @@ public:
 			}
 			else
 			{
-				bool stripped = false;
+				// Remove specified fields from JSON object
 				for (const auto& field : stripFields)
 				{
-					if (doc.HasMember(field.c_str()))
+					if (j.contains(field))
 					{
-						doc.RemoveMember(field.c_str());
-						stripped = true;
+						j.erase(field);
+						ServerInstance->Logs.Debug(MODNAME, "Stripped field '{}' from realname for user {}", field, user->nick);
 					}
 				}
 
-				if (!stripped)
-					return;
-
-				if (doc.ObjectEmpty())
+				std::string result;
+				// If all fields were stripped, set to empty
+				if (j.empty())
 				{
-					user->ChangeRealName("");
+					result = "";
 				}
 				else
 				{
-					rapidjson::StringBuffer buffer;
-					rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-					doc.Accept(writer);
-					user->ChangeRealName(buffer.GetString());
+					result = j.dump();
 				}
+
+				user->ChangeRealName(result);
+				ServerInstance->Logs.Debug(MODNAME, "New realname for user {}: {}", user->nick, result);
 			}
 		}
 	}
