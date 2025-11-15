@@ -31,6 +31,7 @@ Add a `<kmerspam>` block to `inspircd.conf`:
     tau="600"
     max_cache_size="100000"
     cache_ttl="600"
+    min_observations="1000"
     exemptmodes="CoaA"
     trustedmodes="Vr"
     trusted_multiplier="5.0"
@@ -50,6 +51,7 @@ Add a `<kmerspam>` block to `inspircd.conf`:
 | `exemptmodes`       | `CoaA`  | Users with any of these user modes (e.g., creator/oper/admin) bypass the filter entirely. |
 | `trustedmodes`      | `Vr`    | Users with any of these modes get their threshold multiplied by `trusted_multiplier`. |
 | `trusted_multiplier`| `5.0`   | Factor applied to trusted users’ threshold (capped at 1.0).                |
+| `min_observations`  | `1000`  | Minimum cached k-mer observations before detection activates (prevents cold-start false positives). |
 | `action`            | `block` | `block` sends an error, `gline` additionally glines, `silent` drops quietly.|
 | `gline_duration`    | `3600`  | Timed G-line length when `action="gline"`.                                 |
 
