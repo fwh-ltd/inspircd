@@ -18,6 +18,7 @@
 
 #include "inspircd.h"
 #include "numerichelper.h"
+#include "timeutils.h"
 #include "xline.h"
 
 #ifdef USE_SYSTEM_UTFCPP
