@@ -18,6 +18,7 @@
 
 #include "inspircd.h"
 #include "numerichelper.h"
+#include "xline.h"
 
 #ifdef USE_SYSTEM_UTFCPP
 # include <utf8cpp/utf8.h>
