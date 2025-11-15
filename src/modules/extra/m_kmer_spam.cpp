@@ -18,7 +18,11 @@
 
 #include "inspircd.h"
 
-#include <utfcpp/core.h>
+#ifdef USE_SYSTEM_UTFCPP
+# include <utf8cpp/utf8.h>
+#else
+# include <utfcpp/core.h>
+#endif
 
 namespace
 {
