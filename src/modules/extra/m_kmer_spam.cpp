@@ -288,7 +288,7 @@ private:
 		User* dest = target.Get<User>();
 		const std::string targetname = dest ? dest->nick : "*";
 		ServerInstance->Logs.Normal(MODNAME, "k-mer spam: {} -> {} blocked (E={} threshold={}) text='{}'",
-			user->GetFullRealHost(), targetname, evalue, threshold, normalized);
+			user->GetRealHost(), targetname, evalue, threshold, normalized);
 
 		switch (action)
 		{
