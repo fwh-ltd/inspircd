@@ -130,7 +130,10 @@ public:
 		if (kmers.empty())
 			return MOD_RES_PASSTHRU;
 
-		const double evalue = CalculateEValue(kmers);
+	unsigned int overlap = 0;
+	double overlap_ratio = 0;
+	double expected_ratio = 0;
+	const double evalue = CalculateEValue(kmers, overlap, overlap_ratio, expected_ratio);
 		const double threshold = GetThreshold(local);
 		if (evalue < threshold)
 		{
@@ -219,8 +222,12 @@ private:
 		return kmers;
 	}
 
-	double CalculateEValue(const std::vector<std::string>& kmers)
+	double CalculateEValue(const std::vector<std::string>& kmers, unsigned int& overlap, double& overlap_ratio, double& expected_ratio)
 	{
+		overlap = 0;
+		overlap_ratio = 0;
+		expected_ratio = 0;
+
 		if (kmers.empty())
 			return 1.0;
 
@@ -234,7 +241,6 @@ private:
 		if (!total)
 			return 1.0;
 
-		unsigned int overlap = 0;
 		double expected = 0.0;
 		for (const auto& kmer : kmers)
 		{
@@ -250,8 +256,8 @@ private:
 		if (!overlap)
 			return 1.0;
 
-		const double overlap_ratio = static_cast<double>(overlap) / static_cast<double>(kmers.size());
-		const double expected_ratio = std::max(0.01, expected / static_cast<double>(kmers.size()));
+		overlap_ratio = static_cast<double>(overlap) / static_cast<double>(kmers.size());
+		expected_ratio = std::max(0.01, expected / static_cast<double>(kmers.size()));
 
 		if (overlap_ratio <= expected_ratio)
 			return 1.0;
