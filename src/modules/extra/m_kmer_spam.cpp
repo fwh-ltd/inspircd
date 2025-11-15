@@ -79,6 +79,7 @@ private:
 	std::string exemptmodes = "CoaA";
 	std::string trustedmodes = "Vr";
 	double trustedmultiplier = 5.0;
+	size_t minobservations = 1000;
 	time_t lastcleanup = 0;
 
 public:
@@ -101,6 +102,7 @@ public:
 		exemptmodes = tag->getString("exemptmodes", "CoaA");
 		trustedmodes = tag->getString("trustedmodes", "Vr");
 		trustedmultiplier = tag->getNum<double>("trusted_multiplier", 5.0, 1.0, 20.0);
+		minobservations = tag->getNum<size_t>("min_observations", 1000);
 
 		std::string actionstr = tag->getString("action", "block");
 		std::transform(actionstr.begin(), actionstr.end(), actionstr.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -133,7 +135,14 @@ public:
 	unsigned int overlap = 0;
 	double overlap_ratio = 0;
 	double expected_ratio = 0;
-	const double evalue = CalculateEValue(kmers, overlap, overlap_ratio, expected_ratio);
+		unsigned long totalobservations = 0;
+		const double evalue = CalculateEValue(kmers, overlap, overlap_ratio, expected_ratio, totalobservations);
+		if (totalobservations < minobservations)
+		{
+			ServerInstance->Logs.Debug(MODNAME, "k-mer spam: insufficient observations ({} < {}), skipping detection for {}", totalobservations, minobservations, user->nick);
+			UpdateCache(kmers, local);
+			return MOD_RES_PASSTHRU;
+		}
 		const double threshold = GetThreshold(local);
 		if (evalue < threshold)
 		{
@@ -222,11 +231,12 @@ private:
 		return kmers;
 	}
 
-	double CalculateEValue(const std::vector<std::string>& kmers, unsigned int& overlap, double& overlap_ratio, double& expected_ratio)
+	double CalculateEValue(const std::vector<std::string>& kmers, unsigned int& overlap, double& overlap_ratio, double& expected_ratio, unsigned long& totalobservations)
 	{
 		overlap = 0;
 		overlap_ratio = 0;
 		expected_ratio = 0;
+		totalobservations = 0;
 
 		if (kmers.empty())
 			return 1.0;
@@ -234,11 +244,10 @@ private:
 		const time_t now = ServerInstance->Time();
 		CleanupCache(now, true);
 
-		unsigned long total = 0;
 		for (const auto& [_, entry] : cache)
-			total += entry.frequency;
+			totalobservations += entry.frequency;
 
-		if (!total)
+		if (!totalobservations)
 			return 1.0;
 
 		double expected = 0.0;
@@ -249,7 +258,7 @@ private:
 				continue;
 
 			overlap++;
-			const double probability = static_cast<double>(it->second.frequency) / static_cast<double>(total);
+			const double probability = static_cast<double>(it->second.frequency) / static_cast<double>(totalobservations);
 			expected += probability;
 		}
 
