@@ -80,6 +80,8 @@ private:
 	std::string trustedmodes = "Vr";
 	double trustedmultiplier = 5.0;
 	size_t minobservations = 1000;
+	double expectedfloor = 0.01;
+	double penaltyfactor = 10.0;
 	time_t lastcleanup = 0;
 
 public:
@@ -103,6 +105,8 @@ public:
 		trustedmodes = tag->getString("trustedmodes", "Vr");
 		trustedmultiplier = tag->getNum<double>("trusted_multiplier", 5.0, 1.0, 20.0);
 		minobservations = tag->getNum<size_t>("min_observations", 1000);
+		expectedfloor = tag->getNum<double>("expected_ratio_floor", 0.05, 0.0, 1.0);
+		penaltyfactor = tag->getNum<double>("penalty", 10.0, 0.5, 50.0);
 
 		std::string actionstr = tag->getString("action", "block");
 		std::transform(actionstr.begin(), actionstr.end(), actionstr.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -266,12 +270,12 @@ private:
 			return 1.0;
 
 		overlap_ratio = static_cast<double>(overlap) / static_cast<double>(kmers.size());
-		expected_ratio = std::max(0.01, expected / static_cast<double>(kmers.size()));
+		expected_ratio = std::max(expectedfloor, expected / static_cast<double>(kmers.size()));
 
 		if (overlap_ratio <= expected_ratio)
 			return 1.0;
 
-		return std::exp(-(overlap_ratio - expected_ratio) * 10.0);
+		return std::exp(-(overlap_ratio - expected_ratio) * penaltyfactor);
 	}
 
 	bool HasListedMode(LocalUser* user, const std::string& modes) const

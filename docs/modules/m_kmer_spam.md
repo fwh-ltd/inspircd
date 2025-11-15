@@ -32,6 +32,8 @@ Add a `<kmerspam>` block to `inspircd.conf`:
     max_cache_size="100000"
     cache_ttl="600"
     min_observations="1000"
+    expected_ratio_floor="0.05"
+    penalty="10.0"
     exemptmodes="CoaA"
     trustedmodes="Vr"
     trusted_multiplier="5.0"
@@ -50,8 +52,10 @@ Add a `<kmerspam>` block to `inspircd.conf`:
 | `cache_ttl`         | `600`   | Expire entries that have not been observed within this window (seconds).    |
 | `exemptmodes`       | `CoaA`  | Users with any of these user modes (e.g., creator/oper/admin) bypass the filter entirely. |
 | `trustedmodes`      | `Vr`    | Users with any of these modes get their threshold multiplied by `trusted_multiplier`. |
-| `trusted_multiplier`| `5.0`   | Factor applied to trusted users’ threshold (capped at 1.0).                |
-| `min_observations`  | `1000`  | Minimum cached k-mer observations before detection activates (prevents cold-start false positives). |
+| `trusted_multiplier`| `5.0`   | Multiplier for trusted users; the final threshold is `min(threshold * trusted_multiplier, 1.0)`. |
+| `min_observations`  | `1000`  | Minimum cached k-mer observations before detection activates. A higher value delays enforcement on new networks to avoid cold-start false positives. |
+| `expected_ratio_floor` | `0.05` | Baseline expected overlap ratio when the cache is sparse. Increasing this forces the detector to tolerate more overlap before treating it as surprising. |
+| `penalty`           | `10.0`  | Multiplier in the `exp(-(ratio-expected)*penalty)` calculation. Lower values make detection less aggressive; higher values punish overlaps more harshly. |
 | `action`            | `block` | `block` sends an error, `gline` additionally glines, `silent` drops quietly.|
 | `gline_duration`    | `3600`  | Timed G-line length when `action="gline"`.                                 |
 
@@ -59,9 +63,8 @@ Add a `<kmerspam>` block to `inspircd.conf`:
 
 * Only outbound messages from local users are inspected; remote traffic is assumed to
   be filtered at the origin server.
-* The cache is in-memory and resets on restart; it represents roughly ~5 MB at the
-  default settings.
-* Review `ircd.log` (look for the `kmerspam` tag) to monitor detections or tune thresholds.
+* The cache is in-memory (~5 MB at the defaults) and resets on restart. Pair `min_observations` and `expected_ratio_floor` to control how soon detection becomes active.
+* Review `ircd.log` (look for the `kmerspam` tag) to capture detection metrics (k-mer counts, overlaps, E-values) before adjusting thresholds or the penalty factor.
 
 Load the module after compiling:
 
