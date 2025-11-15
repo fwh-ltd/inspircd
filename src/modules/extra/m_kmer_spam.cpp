@@ -134,6 +134,8 @@ public:
 		const double threshold = GetThreshold(local);
 		if (evalue < threshold)
 		{
+			ServerInstance->Logs.Normal(MODNAME, "k-mer spam detected: user={} host={} kmers={} overlap={} ratio={} expected_ratio={} evalue={} threshold={} text='{}'",
+				user->nick, user->GetRealHost(), kmers.size(), overlap, overlap_ratio, expected_ratio, evalue, threshold, normalized);
 			HandleDetection(local, target, normalized, evalue, threshold);
 			return MOD_RES_DENY;
 		}
