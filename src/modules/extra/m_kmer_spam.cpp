@@ -124,6 +124,9 @@ public:
 		if (!local)
 			return MOD_RES_PASSTHRU;
 
+		if (HasListedMode(local, exemptmodes))
+			return MOD_RES_PASSTHRU;
+
 		// Only examine direct messages (PRIVMSG/TAGMSG to a single user).
 		if (target.type != MessageTarget::TYPE_USER)
 			return MOD_RES_PASSTHRU;
