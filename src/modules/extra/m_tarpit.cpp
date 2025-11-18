@@ -335,7 +335,13 @@ private:
 			delay = stats.last_delay;
 
 		if (now < stats.tarpit_until)
-			delay = static_cast<unsigned long>(std::ceil(static_cast<double>(delay) * tarpitmultiplier));
+		{
+			const double scaled = std::ceil(static_cast<double>(delay) * tarpitmultiplier);
+			if (scaled > static_cast<double>(std::numeric_limits<unsigned long>::max()))
+				delay = std::numeric_limits<unsigned long>::max();
+			else
+				delay = static_cast<unsigned long>(scaled);
+		}
 
 		if (tarpitmaxdelay && delay > tarpitmaxdelay)
 			delay = tarpitmaxdelay;
