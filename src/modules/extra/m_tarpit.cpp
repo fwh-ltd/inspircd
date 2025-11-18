@@ -221,7 +221,10 @@ private:
 	{
 		auto* stats = userstats.Get(user);
 		if (!stats)
-			stats = userstats.Set(user, new UserStats);
+		{
+			stats = new UserStats;
+			userstats.Set(user, stats);
+		}
 		return stats;
 	}
 
