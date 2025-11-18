@@ -63,7 +63,9 @@ and only hard-blocks once you flip `action` to `block` or `gline`. All other kno
 | Option         | Default | Purpose                                                                                              |
 | -------------- | ------- | ---------------------------------------------------------------------------------------------------- |
 | `action`       | `delay` | `delay` (tarpit), `block`, `gline`, or `silent`. Delay queues the message and replays it after `tarpit_delay`. |
-| `tarpit_delay` | `10s`   | How long to delay each queued message when `action="delay"`.                                         |
+| `tarpit_delay` | `10s`   | Base delay for each queued message when `action="delay"`.                                            |
+| `tarpit_multiplier` | `2.0` | Multiply the delay by this factor if the user is already in the tarpit (ratchets repeat offenders). |
+| `tarpit_max_delay` | `0` | Optional cap on the per-message delay (0 = unlimited).                                               |
 | `gline_duration` | `3600` | Timed G-line length when `action="gline"`.                                                          |
 
 ### Operational notes
