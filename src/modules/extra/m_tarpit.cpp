@@ -332,10 +332,26 @@ private:
 		unsigned long delay = tarpitdelay;
 		if (now < stats.tarpit_until)
 		{
+<<<<<<< HEAD
 			delay = static_cast<unsigned long>(std::ceil(delay * tarpitmultiplier));
 			if (tarpitmaxdelay && delay > tarpitmaxdelay)
 				delay = tarpitmaxdelay;
 		}
+=======
+			const double scaled = std::ceil(static_cast<double>(delay) * tarpitmultiplier);
+			if (scaled > static_cast<double>(std::numeric_limits<unsigned long>::max()))
+				delay = std::numeric_limits<unsigned long>::max();
+			else
+				delay = static_cast<unsigned long>(scaled);
+		}
+
+		if (tarpitmaxdelay && delay > tarpitmaxdelay)
+			delay = tarpitmaxdelay;
+
+		if (delay < tarpitdelay)
+			delay = tarpitdelay;
+
+>>>>>>> f85085318 (fix(tarpit): overflow guard)
 		pending.release = std::max(now, stats.tarpit_until) + delay;
 		stats.tarpit_until = pending.release;
 		stats.queue.push_back(pending);
