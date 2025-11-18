@@ -68,6 +68,7 @@ namespace
 		insp::flat_set<std::string> early_distinct;
 		double early_weight_sum = 0.0;
 		time_t tarpit_until = 0;
+		unsigned long last_delay = 0;
 		bool bypass = false;
 		std::deque<TarpitMessage> queue;
 	};
@@ -219,7 +220,7 @@ public:
 			if (reason.empty())
 				reason = "repeat-delay";
 
-			ServerInstance->Logs.Normal(MODNAME, "Tarpitting {} -> {} for {}s (reason={} ratio={} weight={} spammy={} text='{}')",
+			ServerInstance->Logs.Normal(MODNAME, "Tarpitting {} -> {} for {}s (reason={} ratio={:.3f} weight={:.3f} spammy={:.3f} text='{}')",
 				user->nick, target.Get<User>()->nick, delay, reason, ratio, weightavg, spammy_ratio, details.text);
 
 			return MOD_RES_DENY;
@@ -330,14 +331,11 @@ private:
 		pending.target = dest->nick;
 		pending.message = details.text;
 		unsigned long delay = tarpitdelay;
+		if (now < stats.tarpit_until && stats.last_delay)
+			delay = stats.last_delay;
+
 		if (now < stats.tarpit_until)
 		{
-<<<<<<< HEAD
-			delay = static_cast<unsigned long>(std::ceil(delay * tarpitmultiplier));
-			if (tarpitmaxdelay && delay > tarpitmaxdelay)
-				delay = tarpitmaxdelay;
-		}
-=======
 			const double scaled = std::ceil(static_cast<double>(delay) * tarpitmultiplier);
 			if (scaled > static_cast<double>(std::numeric_limits<unsigned long>::max()))
 				delay = std::numeric_limits<unsigned long>::max();
@@ -351,14 +349,10 @@ private:
 		if (delay < tarpitdelay)
 			delay = tarpitdelay;
 
->>>>>>> f85085318 (fix(tarpit): overflow guard)
 		pending.release = std::max(now, stats.tarpit_until) + delay;
 		stats.tarpit_until = pending.release;
+		stats.last_delay = delay;
 		stats.queue.push_back(pending);
-
-		user->WriteNotice("Your message has been delayed by the spam filter.");
-		ServerInstance->Logs.Debug(MODNAME, "Delaying message from {} to {} until {}",
-			user->nick, pending.target, pending.release);
 
 		return delay;
 	}
@@ -394,7 +388,10 @@ private:
 			}
 
 			if (released && stats->queue.empty() && now >= stats->tarpit_until)
+			{
 				stats->tarpit_until = now;
+				stats->last_delay = 0;
+			}
 		}
 	}
 
