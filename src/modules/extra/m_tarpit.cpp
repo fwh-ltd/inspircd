@@ -61,12 +61,6 @@ namespace
 		time_t release = 0;
 	};
 
-	struct FanoutHit final
-	{
-		std::string target;
-		time_t time = 0;
-	};
-
 	struct UserStats final
 	{
 		size_t early_messages = 0;
@@ -74,11 +68,8 @@ namespace
 		insp::flat_set<std::string> early_distinct;
 		double early_weight_sum = 0.0;
 		time_t tarpit_until = 0;
-		unsigned long last_delay = 0;
 		bool bypass = false;
 		std::deque<TarpitMessage> queue;
-		std::deque<FanoutHit> fanout_recent;
-		insp::flat_map<std::string, size_t> fanout_counts;
 	};
 
 	bool IsZeroWidth(uint32_t cp)
@@ -118,13 +109,6 @@ private:
 	unsigned long tarpitdelay = 10;
 	double tarpitmultiplier = 2.0;
 	unsigned long tarpitmaxdelay = 0;
-	double kmerpenalty = 0.0;
-	unsigned long kmerpenaltycap = 0;
-	double kmerpenaltyminratio = 0.0;
-	double kmerpenaltyminscore = 0.0;
-	double fanoutdelay = 0.0;
-	double fanoutmultiplier = 1.0;
-	unsigned long fanoutwindow = 30;
 	unsigned long glineduration = 3600;
 	unsigned long totalobservations = 0;
 	std::string exemptmodes = "CoaA";
@@ -154,13 +138,6 @@ public:
 		tarpitdelay = tag->getDuration("tarpit_delay", 10, 1, 600);
 		tarpitmultiplier = tag->getNum<double>("tarpit_multiplier", 2.0, 1.0, 10.0);
 		tarpitmaxdelay = tag->getDuration("tarpit_max_delay", 0, 0, 86400);
-		kmerpenalty = tag->getNum<double>("kmer_penalty", 0.0, 0.0, 3600.0);
-		kmerpenaltycap = tag->getDuration("kmer_penalty_cap", 0, 0, 86400);
-		kmerpenaltyminratio = tag->getNum<double>("kmer_penalty_min_ratio", 0.0, 0.0, 1.0);
-		kmerpenaltyminscore = tag->getNum<double>("kmer_penalty_min_score", 0.0, 0.0, 1000.0);
-		fanoutdelay = tag->getNum<double>("fanout_delay", 0.0, 0.0, 60.0);
-		fanoutmultiplier = tag->getNum<double>("fanout_multiplier", 1.0, 1.0, 10.0);
-		fanoutwindow = tag->getDuration("fanout_window", 30, 0, 600);
 		glineduration = tag->getDuration("gline_duration", 3600, 60, 86400);
 		exemptmodes = tag->getString("exemptmodes", "CoaA");
 		trustedmodes = tag->getString("trustedmodes", "Vr");
@@ -218,10 +195,8 @@ public:
 		const bool earlytrip = (stats->early_messages <= earlymaxmessages)
 			&& (ratio < earlyratio) && (weightavg < earlyweight);
 		const bool reputationtrip = (spammy_ratio > spammythreshold);
-		const unsigned long kmerbonus = CalculateKmerPenalty(kmers, spammy_ratio, now);
-		const bool kmerpenaltytrip = (kmerbonus > 0);
 
-		bool shoulddelay = (now < stats->tarpit_until) || earlytrip || reputationtrip || kmerpenaltytrip;
+		bool shoulddelay = (now < stats->tarpit_until) || earlytrip || reputationtrip;
 
 		if (!shoulddelay)
 			return MOD_RES_PASSTHRU;
@@ -231,38 +206,7 @@ public:
 
 		if (action == SpamAction::DELAY)
 		{
-			bool fanouttrip = false;
-			const unsigned long delay = QueueMessage(*stats, local, target, details, now, fanouttrip, kmerbonus);
-			if (!delay)
-			{
-				std::string reason;
-				if (earlytrip)
-					reason = "low-entropy";
-				if (reputationtrip)
-				{
-					if (!reason.empty())
-						reason += "+";
-					reason += "spammy-kmer";
-				}
-				if (kmerpenaltytrip)
-				{
-					if (!reason.empty())
-						reason += "+";
-					reason += "kmer-penalty";
-				}
-				if (fanouttrip)
-				{
-					if (!reason.empty())
-						reason += "+";
-					reason += "fanout";
-				}
-				if (reason.empty())
-					reason = "repeat-delay";
-
-				ServerInstance->Logs.Normal(MODNAME, "Dropping {} -> {} (reason={} exceeded tarpit_max={}s ratio={:.3f} weight={:.3f} spammy={:.3f} text='{}')",
-					user->nick, target.Get<User>()->nick, reason, tarpitmaxdelay, ratio, weightavg, spammy_ratio, details.text);
-				return MOD_RES_DENY;
-			}
+			const unsigned long delay = QueueMessage(*stats, local, target, details, now);
 			std::string reason;
 			if (earlytrip)
 				reason = "low-entropy";
@@ -272,22 +216,10 @@ public:
 					reason += "+";
 				reason += "spammy-kmer";
 			}
-			if (kmerpenaltytrip)
-			{
-				if (!reason.empty())
-					reason += "+";
-				reason += "kmer-penalty";
-			}
-			if (fanouttrip)
-			{
-				if (!reason.empty())
-					reason += "+";
-				reason += "fanout";
-			}
 			if (reason.empty())
 				reason = "repeat-delay";
 
-			ServerInstance->Logs.Normal(MODNAME, "Tarpitting {} -> {} for {}s (reason={} ratio={:.3f} weight={:.3f} spammy={:.3f} text='{}')",
+			ServerInstance->Logs.Normal(MODNAME, "Tarpitting {} -> {} for {}s (reason={} ratio={} weight={} spammy={} text='{}')",
 				user->nick, target.Get<User>()->nick, delay, reason, ratio, weightavg, spammy_ratio, details.text);
 
 			return MOD_RES_DENY;
@@ -377,40 +309,6 @@ private:
 		return static_cast<double>(hits) / static_cast<double>(kmers.size());
 	}
 
-	unsigned long CalculateKmerPenalty(const std::vector<std::string>& kmers, double spammy_ratio, time_t now) const
-	{
-		if ((kmerpenalty <= 0.0) || kmers.empty())
-			return 0;
-
-		if (spammy_ratio < kmerpenaltyminratio)
-			return 0;
-
-		insp::flat_set<std::string> distinct(kmers.begin(), kmers.end());
-		double scoretotal = 0.0;
-		for (const auto& kmer : distinct)
-		{
-			auto it = reputation.find(kmer);
-			if (it == reputation.end())
-				continue;
-			if ((now - it->second.last_seen) > static_cast<time_t>(reputationttl))
-				continue;
-			if (it->second.score < kmerpenaltyminscore)
-				continue;
-			scoretotal += it->second.score;
-		}
-
-		if (scoretotal <= 0.0)
-			return 0;
-
-		double penalty = scoretotal * kmerpenalty;
-		if (kmerpenaltycap && penalty > static_cast<double>(kmerpenaltycap))
-			penalty = static_cast<double>(kmerpenaltycap);
-
-		if (penalty > static_cast<double>(std::numeric_limits<unsigned long>::max()))
-			return std::numeric_limits<unsigned long>::max();
-		return static_cast<unsigned long>(std::ceil(penalty));
-	}
-
 	void MarkKmersSpammy(const std::vector<std::string>& kmers, time_t now)
 	{
 		for (const auto& kmer : kmers)
@@ -421,46 +319,7 @@ private:
 		}
 	}
 
-	unsigned long CalculateFanoutPenalty(UserStats& stats, const std::string& target, time_t now) const
-	{
-		if ((fanoutdelay <= 0.0) || !fanoutwindow)
-			return 0;
-
-		while (!stats.fanout_recent.empty() && (now - stats.fanout_recent.front().time) > static_cast<time_t>(fanoutwindow))
-		{
-			const FanoutHit& expired = stats.fanout_recent.front();
-			auto it = stats.fanout_counts.find(expired.target);
-			if (it != stats.fanout_counts.end())
-			{
-				if (it->second <= 1)
-					stats.fanout_counts.erase(it);
-				else
-					it->second--;
-			}
-			stats.fanout_recent.pop_front();
-		}
-
-		stats.fanout_recent.push_back({target, now});
-		auto& count = stats.fanout_counts[target];
-		count++;
-
-		const size_t unique = stats.fanout_counts.size();
-		if (unique <= 1)
-			return 0;
-
-		double penalty = fanoutdelay;
-		if (fanoutmultiplier > 1.0 && unique > 1)
-			penalty *= std::pow(fanoutmultiplier, static_cast<double>(unique - 1));
-
-		if (penalty <= 0.0)
-			return 0;
-
-		if (penalty > static_cast<double>(std::numeric_limits<unsigned long>::max()))
-			return std::numeric_limits<unsigned long>::max();
-		return static_cast<unsigned long>(std::ceil(penalty));
-	}
-
-	unsigned long QueueMessage(UserStats& stats, LocalUser* user, MessageTarget& target, MessageDetails& details, time_t now, bool& fanouttrip, unsigned long kmerbonus)
+	unsigned long QueueMessage(UserStats& stats, LocalUser* user, MessageTarget& target, MessageDetails& details, time_t now) const
 	{
 		User* dest = target.Get<User>();
 		if (!dest)
@@ -471,49 +330,19 @@ private:
 		pending.target = dest->nick;
 		pending.message = details.text;
 		unsigned long delay = tarpitdelay;
-		if (now < stats.tarpit_until && stats.last_delay)
-			delay = stats.last_delay;
-
 		if (now < stats.tarpit_until)
 		{
-			const double scaled = std::ceil(static_cast<double>(delay) * tarpitmultiplier);
-			if (scaled > static_cast<double>(std::numeric_limits<unsigned long>::max()))
-				delay = std::numeric_limits<unsigned long>::max();
-			else
-				delay = static_cast<unsigned long>(scaled);
+			delay = static_cast<unsigned long>(std::ceil(delay * tarpitmultiplier));
+			if (tarpitmaxdelay && delay > tarpitmaxdelay)
+				delay = tarpitmaxdelay;
 		}
-
-		const unsigned long fanoutbonus = CalculateFanoutPenalty(stats, pending.target, now);
-		if (fanoutbonus)
-		{
-			fanouttrip = true;
-			if (std::numeric_limits<unsigned long>::max() - delay <= fanoutbonus)
-				delay = std::numeric_limits<unsigned long>::max();
-			else
-				delay += fanoutbonus;
-		}
-
-		if (kmerbonus)
-		{
-			if (std::numeric_limits<unsigned long>::max() - delay <= kmerbonus)
-				delay = std::numeric_limits<unsigned long>::max();
-			else
-				delay += kmerbonus;
-		}
-
-		if (tarpitmaxdelay && delay >= tarpitmaxdelay)
-		{
-			stats.last_delay = tarpitmaxdelay;
-			return 0;
-		}
-
-		if (delay < tarpitdelay)
-			delay = tarpitdelay;
-
 		pending.release = std::max(now, stats.tarpit_until) + delay;
 		stats.tarpit_until = pending.release;
-		stats.last_delay = delay;
 		stats.queue.push_back(pending);
+
+		user->WriteNotice("Your message has been delayed by the spam filter.");
+		ServerInstance->Logs.Debug(MODNAME, "Delaying message from {} to {} until {}",
+			user->nick, pending.target, pending.release);
 
 		return delay;
 	}
@@ -549,10 +378,7 @@ private:
 			}
 
 			if (released && stats->queue.empty() && now >= stats->tarpit_until)
-			{
 				stats->tarpit_until = now;
-				stats->last_delay = 0;
-			}
 		}
 	}
 
