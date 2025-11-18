@@ -337,7 +337,7 @@ private:
 				if (user->quitting)
 					continue;
 
-				std::vector<std::string> params;
+				CommandBase::Params params;
 				params.push_back(msg.target);
 				params.push_back(msg.message);
 
