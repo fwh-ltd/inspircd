@@ -106,8 +106,9 @@ private:
 	size_t maxcachesize = 100000;
 	unsigned long cachettl = 600;
 	unsigned long reputationttl = 900;
-	size_t warmupobservations = 5000;
 	unsigned long tarpitdelay = 10;
+	double tarpitmultiplier = 2.0;
+	unsigned long tarpitmaxdelay = 0;
 	unsigned long glineduration = 3600;
 	unsigned long totalobservations = 0;
 	std::string exemptmodes = "CoaA";
@@ -134,8 +135,9 @@ public:
 		maxcachesize = tag->getNum<size_t>("max_cache_size", 100000, 1000, 500000);
 		cachettl = tag->getDuration("cache_ttl", 600, 60, 3600);
 		reputationttl = tag->getDuration("reputation_ttl", 900, 60, 7200);
-		warmupobservations = tag->getNum<size_t>("warmup_observations", 5000, 0, 1000000);
 		tarpitdelay = tag->getDuration("tarpit_delay", 10, 1, 600);
+		tarpitmultiplier = tag->getNum<double>("tarpit_multiplier", 2.0, 1.0, 10.0);
+		tarpitmaxdelay = tag->getDuration("tarpit_max_delay", 0, 0, 86400);
 		glineduration = tag->getDuration("gline_duration", 3600, 60, 86400);
 		exemptmodes = tag->getString("exemptmodes", "CoaA");
 		trustedmodes = tag->getString("trustedmodes", "Vr");
@@ -181,12 +183,6 @@ public:
 
 		const time_t now = ServerInstance->Time();
 
-		if (totalobservations < warmupobservations)
-		{
-			UpdateCache(kmers, now);
-			return MOD_RES_PASSTHRU;
-		}
-
 		const double msgweight = CalculateMessageWeight(kmers);
 		const double spammy_ratio = CalculateSpammyRatio(kmers, now);
 
@@ -210,7 +206,22 @@ public:
 
 		if (action == SpamAction::DELAY)
 		{
-			QueueMessage(*stats, local, target, details, now);
+			const unsigned long delay = QueueMessage(*stats, local, target, details, now);
+			std::string reason;
+			if (earlytrip)
+				reason = "low-entropy";
+			if (reputationtrip)
+			{
+				if (!reason.empty())
+					reason += "+";
+				reason += "spammy-kmer";
+			}
+			if (reason.empty())
+				reason = "repeat-delay";
+
+			ServerInstance->Logs.Normal(MODNAME, "Tarpitting {} -> {} for {}s (reason={} ratio={} weight={} spammy={} text='{}')",
+				user->nick, target.Get<User>()->nick, delay, reason, ratio, weightavg, spammy_ratio, details.text);
+
 			return MOD_RES_DENY;
 		}
 
@@ -308,23 +319,32 @@ private:
 		}
 	}
 
-	void QueueMessage(UserStats& stats, LocalUser* user, MessageTarget& target, MessageDetails& details, time_t now)
+	unsigned long QueueMessage(UserStats& stats, LocalUser* user, MessageTarget& target, MessageDetails& details, time_t now) const
 	{
 		User* dest = target.Get<User>();
 		if (!dest)
-			return;
+			return 0;
 
 		TarpitMessage pending;
 		pending.command = (details.type == MessageType::NOTICE ? "NOTICE" : "PRIVMSG");
 		pending.target = dest->nick;
 		pending.message = details.text;
-		pending.release = std::max(now, stats.tarpit_until) + tarpitdelay;
+		unsigned long delay = tarpitdelay;
+		if (now < stats.tarpit_until)
+		{
+			delay = static_cast<unsigned long>(std::ceil(delay * tarpitmultiplier));
+			if (tarpitmaxdelay && delay > tarpitmaxdelay)
+				delay = tarpitmaxdelay;
+		}
+		pending.release = std::max(now, stats.tarpit_until) + delay;
 		stats.tarpit_until = pending.release;
 		stats.queue.push_back(pending);
 
 		user->WriteNotice("Your message has been delayed by the spam filter.");
 		ServerInstance->Logs.Debug(MODNAME, "Delaying message from {} to {} until {}",
 			user->nick, pending.target, pending.release);
+
+		return delay;
 	}
 
 	void ProcessQueues(time_t now)
