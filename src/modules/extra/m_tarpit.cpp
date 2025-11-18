@@ -20,6 +20,7 @@
 #include "numerichelper.h"
 #include "timeutils.h"
 #include "xline.h"
+#include "extension.h"
 #include <cmath>
 #include <deque>
 
