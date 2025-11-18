@@ -342,7 +342,7 @@ private:
 				params.push_back(msg.message);
 
 				stats->bypass = true;
-				if (!ServerInstance->Parser.CallHandler(msg.command, params, user))
+				if (ServerInstance->Parser.CallHandler(msg.command, params, user) != CmdResult::SUCCESS)
 					user->WriteNotice("A delayed message could not be delivered.");
 				stats->bypass = false;
 				released = true;
