@@ -106,6 +106,7 @@ private:
 	size_t maxcachesize = 100000;
 	unsigned long cachettl = 600;
 	unsigned long reputationttl = 900;
+	size_t warmupobservations = 5000;
 	unsigned long tarpitdelay = 10;
 	unsigned long glineduration = 3600;
 	unsigned long totalobservations = 0;
@@ -133,6 +134,7 @@ public:
 		maxcachesize = tag->getNum<size_t>("max_cache_size", 100000, 1000, 500000);
 		cachettl = tag->getDuration("cache_ttl", 600, 60, 3600);
 		reputationttl = tag->getDuration("reputation_ttl", 900, 60, 7200);
+		warmupobservations = tag->getNum<size_t>("warmup_observations", 5000, 0, 1000000);
 		tarpitdelay = tag->getDuration("tarpit_delay", 10, 1, 600);
 		glineduration = tag->getDuration("gline_duration", 3600, 60, 86400);
 		exemptmodes = tag->getString("exemptmodes", "CoaA");
@@ -178,6 +180,13 @@ public:
 			return MOD_RES_PASSTHRU;
 
 		const time_t now = ServerInstance->Time();
+
+		if (totalobservations < warmupobservations)
+		{
+			UpdateCache(kmers, now);
+			return MOD_RES_PASSTHRU;
+		}
+
 		const double msgweight = CalculateMessageWeight(kmers);
 		const double spammy_ratio = CalculateSpammyRatio(kmers, now);
 
@@ -187,17 +196,17 @@ public:
 
 		UpdateCache(kmers, now);
 
-		bool shoulddelay = (now < stats->tarpit_until);
-		if (!shoulddelay && stats->early_messages <= earlymaxmessages)
-			shoulddelay = (ratio < earlyratio && weightavg < earlyweight);
+		const bool earlytrip = (stats->early_messages <= earlymaxmessages)
+			&& (ratio < earlyratio) && (weightavg < earlyweight);
+		const bool reputationtrip = (spammy_ratio > spammythreshold);
 
-		if (!shoulddelay && spammy_ratio > spammythreshold)
-			shoulddelay = true;
+		bool shoulddelay = (now < stats->tarpit_until) || earlytrip || reputationtrip;
 
 		if (!shoulddelay)
 			return MOD_RES_PASSTHRU;
 
-		MarkKmersSpammy(kmers, now);
+		if (earlytrip)
+			MarkKmersSpammy(kmers, now);
 
 		if (action == SpamAction::DELAY)
 		{
