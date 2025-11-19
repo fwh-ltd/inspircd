@@ -61,6 +61,12 @@ namespace
 		time_t release = 0;
 	};
 
+	struct FanoutHit final
+	{
+		std::string target;
+		time_t time = 0;
+	};
+
 	struct UserStats final
 	{
 		size_t early_messages = 0;
@@ -71,6 +77,8 @@ namespace
 		unsigned long last_delay = 0;
 		bool bypass = false;
 		std::deque<TarpitMessage> queue;
+		std::deque<FanoutHit> fanout_recent;
+		insp::flat_map<std::string, size_t> fanout_counts;
 	};
 
 	bool IsZeroWidth(uint32_t cp)
@@ -110,6 +118,9 @@ private:
 	unsigned long tarpitdelay = 10;
 	double tarpitmultiplier = 2.0;
 	unsigned long tarpitmaxdelay = 0;
+	double fanoutdelay = 0.0;
+	double fanoutmultiplier = 1.0;
+	unsigned long fanoutwindow = 30;
 	unsigned long glineduration = 3600;
 	unsigned long totalobservations = 0;
 	std::string exemptmodes = "CoaA";
@@ -139,6 +150,9 @@ public:
 		tarpitdelay = tag->getDuration("tarpit_delay", 10, 1, 600);
 		tarpitmultiplier = tag->getNum<double>("tarpit_multiplier", 2.0, 1.0, 10.0);
 		tarpitmaxdelay = tag->getDuration("tarpit_max_delay", 0, 0, 86400);
+		fanoutdelay = tag->getNum<double>("fanout_delay", 0.0, 0.0, 60.0);
+		fanoutmultiplier = tag->getNum<double>("fanout_multiplier", 1.0, 1.0, 10.0);
+		fanoutwindow = tag->getDuration("fanout_window", 30, 0, 600);
 		glineduration = tag->getDuration("gline_duration", 3600, 60, 86400);
 		exemptmodes = tag->getString("exemptmodes", "CoaA");
 		trustedmodes = tag->getString("trustedmodes", "Vr");
@@ -207,7 +221,8 @@ public:
 
 		if (action == SpamAction::DELAY)
 		{
-			const unsigned long delay = QueueMessage(*stats, local, target, details, now);
+			bool fanouttrip = false;
+			const unsigned long delay = QueueMessage(*stats, local, target, details, now, fanouttrip);
 			std::string reason;
 			if (earlytrip)
 				reason = "low-entropy";
@@ -216,6 +231,12 @@ public:
 				if (!reason.empty())
 					reason += "+";
 				reason += "spammy-kmer";
+			}
+			if (fanouttrip)
+			{
+				if (!reason.empty())
+					reason += "+";
+				reason += "fanout";
 			}
 			if (reason.empty())
 				reason = "repeat-delay";
@@ -320,7 +341,46 @@ private:
 		}
 	}
 
-	unsigned long QueueMessage(UserStats& stats, LocalUser* user, MessageTarget& target, MessageDetails& details, time_t now) const
+	unsigned long CalculateFanoutPenalty(UserStats& stats, const std::string& target, time_t now) const
+	{
+		if ((fanoutdelay <= 0.0) || !fanoutwindow)
+			return 0;
+
+		while (!stats.fanout_recent.empty() && (now - stats.fanout_recent.front().time) > static_cast<time_t>(fanoutwindow))
+		{
+			const FanoutHit& expired = stats.fanout_recent.front();
+			auto it = stats.fanout_counts.find(expired.target);
+			if (it != stats.fanout_counts.end())
+			{
+				if (it->second <= 1)
+					stats.fanout_counts.erase(it);
+				else
+					it->second--;
+			}
+			stats.fanout_recent.pop_front();
+		}
+
+		stats.fanout_recent.push_back({target, now});
+		auto& count = stats.fanout_counts[target];
+		count++;
+
+		const size_t unique = stats.fanout_counts.size();
+		if (unique <= 1)
+			return 0;
+
+		double penalty = fanoutdelay;
+		if (fanoutmultiplier > 1.0 && unique > 1)
+			penalty *= std::pow(fanoutmultiplier, static_cast<double>(unique - 1));
+
+		if (penalty <= 0.0)
+			return 0;
+
+		if (penalty > static_cast<double>(std::numeric_limits<unsigned long>::max()))
+			return std::numeric_limits<unsigned long>::max();
+		return static_cast<unsigned long>(std::ceil(penalty));
+	}
+
+	unsigned long QueueMessage(UserStats& stats, LocalUser* user, MessageTarget& target, MessageDetails& details, time_t now, bool& fanouttrip)
 	{
 		User* dest = target.Get<User>();
 		if (!dest)
@@ -341,6 +401,16 @@ private:
 				delay = std::numeric_limits<unsigned long>::max();
 			else
 				delay = static_cast<unsigned long>(scaled);
+		}
+
+		const unsigned long fanoutbonus = CalculateFanoutPenalty(stats, pending.target, now);
+		if (fanoutbonus)
+		{
+			fanouttrip = true;
+			if (std::numeric_limits<unsigned long>::max() - delay <= fanoutbonus)
+				delay = std::numeric_limits<unsigned long>::max();
+			else
+				delay += fanoutbonus;
 		}
 
 		if (tarpitmaxdelay && delay > tarpitmaxdelay)
