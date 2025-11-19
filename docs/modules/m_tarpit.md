@@ -16,6 +16,9 @@ connections before they can blast recipients.
 4. Suspicious senders are tarpitted: their messages are queued and replayed after a configurable delay.
    This is similar to SMTP tarpits/greylisting; spammers burn resources waiting, while legit users only notice
    a short pause. If you prefer, you can switch the action to immediate `block`, `gline`, or `silent drop`.
+5. Optionally, a light fan-out tarpit adds a separate delay that grows with the number of unique recipients a
+   connection hits inside a rolling window. High-fanout bots accumulate seconds of penalty even before the
+   entropy/reputation checks fire, while one-to-one chats stay unaffected.
 
 The detection is content-agnostic. Obfuscated spam collapses to the same k-mer sets, so bot farms blasting
 identical payloads from fresh connections are quickly throttled even when they lean on Unicode tricks.
@@ -65,6 +68,9 @@ and only hard-blocks once you flip `action` to `block` or `gline`. All other kno
 | `action`       | `delay` | `delay` (tarpit), `block`, `gline`, or `silent`. Delay queues the message and replays it after `tarpit_delay`. |
 | `tarpit_delay` | `10s`   | Base delay for each queued message when `action="delay"`.                                            |
 | `tarpit_multiplier` | `2.0` | Multiply the delay by this factor if the user is already in the tarpit (ratchets repeat offenders). |
+| `fanout_delay` | `0s` | Optional extra delay applied when a connection talks to multiple unique recipients in quick succession. |
+| `fanout_multiplier` | `1.0` | Grows the fan-out delay exponentially as the number of unique recipients inside the window increases. |
+| `fanout_window` | `30s` | How long a recipient stays in the “recent fan-out” window (set to `0` to disable fan-out tracking). |
 | `tarpit_max_delay` | `0` | Optional cap on the per-message delay (0 = unlimited).                                               |
 | `gline_duration` | `3600` | Timed G-line length when `action="gline"`.                                                          |
 
