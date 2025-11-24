@@ -120,6 +120,8 @@ private:
 	unsigned long tarpitmaxdelay = 0;
 	double kmerpenalty = 0.0;
 	unsigned long kmerpenaltycap = 0;
+	double kmerpenaltyminratio = 0.0;
+	double kmerpenaltyminscore = 0.0;
 	double fanoutdelay = 0.0;
 	double fanoutmultiplier = 1.0;
 	unsigned long fanoutwindow = 30;
@@ -154,6 +156,8 @@ public:
 		tarpitmaxdelay = tag->getDuration("tarpit_max_delay", 0, 0, 86400);
 		kmerpenalty = tag->getNum<double>("kmer_penalty", 0.0, 0.0, 3600.0);
 		kmerpenaltycap = tag->getDuration("kmer_penalty_cap", 0, 0, 86400);
+		kmerpenaltyminratio = tag->getNum<double>("kmer_penalty_min_ratio", 0.0, 0.0, 1.0);
+		kmerpenaltyminscore = tag->getNum<double>("kmer_penalty_min_score", 0.0, 0.0, 1000.0);
 		fanoutdelay = tag->getNum<double>("fanout_delay", 0.0, 0.0, 60.0);
 		fanoutmultiplier = tag->getNum<double>("fanout_multiplier", 1.0, 1.0, 10.0);
 		fanoutwindow = tag->getDuration("fanout_window", 30, 0, 600);
@@ -214,7 +218,7 @@ public:
 		const bool earlytrip = (stats->early_messages <= earlymaxmessages)
 			&& (ratio < earlyratio) && (weightavg < earlyweight);
 		const bool reputationtrip = (spammy_ratio > spammythreshold);
-		const unsigned long kmerbonus = CalculateKmerPenalty(kmers, now);
+		const unsigned long kmerbonus = CalculateKmerPenalty(kmers, spammy_ratio, now);
 		const bool kmerpenaltytrip = (kmerbonus > 0);
 
 		bool shoulddelay = (now < stats->tarpit_until) || earlytrip || reputationtrip || kmerpenaltytrip;
@@ -343,9 +347,12 @@ private:
 		return static_cast<double>(hits) / static_cast<double>(kmers.size());
 	}
 
-	unsigned long CalculateKmerPenalty(const std::vector<std::string>& kmers, time_t now) const
+	unsigned long CalculateKmerPenalty(const std::vector<std::string>& kmers, double spammy_ratio, time_t now) const
 	{
 		if ((kmerpenalty <= 0.0) || kmers.empty())
+			return 0;
+
+		if (spammy_ratio < kmerpenaltyminratio)
 			return 0;
 
 		insp::flat_set<std::string> distinct(kmers.begin(), kmers.end());
@@ -356,6 +363,8 @@ private:
 			if (it == reputation.end())
 				continue;
 			if ((now - it->second.last_seen) > static_cast<time_t>(reputationttl))
+				continue;
+			if (it->second.score < kmerpenaltyminscore)
 				continue;
 			scoretotal += it->second.score;
 		}

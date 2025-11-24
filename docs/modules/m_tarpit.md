@@ -59,6 +59,8 @@ and only hard-blocks once you flip `action` to `block` or `gline`. All other kno
 | `spammy_threshold`   | `0.30`  | Fraction of k-mers previously observed in flagged spam. Trips even outside the early window. |
 | `kmer_penalty`       | `0s`    | Extra tarpit seconds added per unit of spam reputation for the k-mers in a message (0 disables it). |
 | `kmer_penalty_cap`   | `0s`    | Maximum delay the k-mer penalty can add.                                                          |
+| `kmer_penalty_min_ratio` | `0.0` | Require the current message’s spammy ratio to meet this floor before the k-mer penalty applies. |
+| `kmer_penalty_min_score` | `0.0` | Ignore k-mers whose reputation score is below this threshold when computing the penalty.        |
 | `max_cache_size`     | `100000`| Maximum number of cached k-mers before trimming by age.                    |
 | `cache_ttl`          | `600`   | Trim k-mers that have not been seen in this window (seconds).              |
 | `reputation_ttl`     | `900`   | How long spammy k-mers retain their reputation (seconds).                  |
