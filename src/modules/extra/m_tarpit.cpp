@@ -118,6 +118,8 @@ private:
 	unsigned long tarpitdelay = 10;
 	double tarpitmultiplier = 2.0;
 	unsigned long tarpitmaxdelay = 0;
+	double kmerpenalty = 0.0;
+	unsigned long kmerpenaltycap = 0;
 	double fanoutdelay = 0.0;
 	double fanoutmultiplier = 1.0;
 	unsigned long fanoutwindow = 30;
@@ -150,6 +152,8 @@ public:
 		tarpitdelay = tag->getDuration("tarpit_delay", 10, 1, 600);
 		tarpitmultiplier = tag->getNum<double>("tarpit_multiplier", 2.0, 1.0, 10.0);
 		tarpitmaxdelay = tag->getDuration("tarpit_max_delay", 0, 0, 86400);
+		kmerpenalty = tag->getNum<double>("kmer_penalty", 0.0, 0.0, 3600.0);
+		kmerpenaltycap = tag->getDuration("kmer_penalty_cap", 0, 0, 86400);
 		fanoutdelay = tag->getNum<double>("fanout_delay", 0.0, 0.0, 60.0);
 		fanoutmultiplier = tag->getNum<double>("fanout_multiplier", 1.0, 1.0, 10.0);
 		fanoutwindow = tag->getDuration("fanout_window", 30, 0, 600);
@@ -210,8 +214,10 @@ public:
 		const bool earlytrip = (stats->early_messages <= earlymaxmessages)
 			&& (ratio < earlyratio) && (weightavg < earlyweight);
 		const bool reputationtrip = (spammy_ratio > spammythreshold);
+		const unsigned long kmerbonus = CalculateKmerPenalty(kmers, now);
+		const bool kmerpenaltytrip = (kmerbonus > 0);
 
-		bool shoulddelay = (now < stats->tarpit_until) || earlytrip || reputationtrip;
+		bool shoulddelay = (now < stats->tarpit_until) || earlytrip || reputationtrip || kmerpenaltytrip;
 
 		if (!shoulddelay)
 			return MOD_RES_PASSTHRU;
@@ -222,7 +228,7 @@ public:
 		if (action == SpamAction::DELAY)
 		{
 			bool fanouttrip = false;
-			const unsigned long delay = QueueMessage(*stats, local, target, details, now, fanouttrip);
+			const unsigned long delay = QueueMessage(*stats, local, target, details, now, fanouttrip, kmerbonus);
 			std::string reason;
 			if (earlytrip)
 				reason = "low-entropy";
@@ -231,6 +237,12 @@ public:
 				if (!reason.empty())
 					reason += "+";
 				reason += "spammy-kmer";
+			}
+			if (kmerpenaltytrip)
+			{
+				if (!reason.empty())
+					reason += "+";
+				reason += "kmer-penalty";
 			}
 			if (fanouttrip)
 			{
@@ -331,6 +343,35 @@ private:
 		return static_cast<double>(hits) / static_cast<double>(kmers.size());
 	}
 
+	unsigned long CalculateKmerPenalty(const std::vector<std::string>& kmers, time_t now) const
+	{
+		if ((kmerpenalty <= 0.0) || kmers.empty())
+			return 0;
+
+		insp::flat_set<std::string> distinct(kmers.begin(), kmers.end());
+		double scoretotal = 0.0;
+		for (const auto& kmer : distinct)
+		{
+			auto it = reputation.find(kmer);
+			if (it == reputation.end())
+				continue;
+			if ((now - it->second.last_seen) > static_cast<time_t>(reputationttl))
+				continue;
+			scoretotal += it->second.score;
+		}
+
+		if (scoretotal <= 0.0)
+			return 0;
+
+		double penalty = scoretotal * kmerpenalty;
+		if (kmerpenaltycap && penalty > static_cast<double>(kmerpenaltycap))
+			penalty = static_cast<double>(kmerpenaltycap);
+
+		if (penalty > static_cast<double>(std::numeric_limits<unsigned long>::max()))
+			return std::numeric_limits<unsigned long>::max();
+		return static_cast<unsigned long>(std::ceil(penalty));
+	}
+
 	void MarkKmersSpammy(const std::vector<std::string>& kmers, time_t now)
 	{
 		for (const auto& kmer : kmers)
@@ -380,7 +421,7 @@ private:
 		return static_cast<unsigned long>(std::ceil(penalty));
 	}
 
-	unsigned long QueueMessage(UserStats& stats, LocalUser* user, MessageTarget& target, MessageDetails& details, time_t now, bool& fanouttrip)
+	unsigned long QueueMessage(UserStats& stats, LocalUser* user, MessageTarget& target, MessageDetails& details, time_t now, bool& fanouttrip, unsigned long kmerbonus)
 	{
 		User* dest = target.Get<User>();
 		if (!dest)
@@ -411,6 +452,14 @@ private:
 				delay = std::numeric_limits<unsigned long>::max();
 			else
 				delay += fanoutbonus;
+		}
+
+		if (kmerbonus)
+		{
+			if (std::numeric_limits<unsigned long>::max() - delay <= kmerbonus)
+				delay = std::numeric_limits<unsigned long>::max();
+			else
+				delay += kmerbonus;
 		}
 
 		if (tarpitmaxdelay && delay > tarpitmaxdelay)
