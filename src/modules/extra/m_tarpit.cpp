@@ -233,6 +233,36 @@ public:
 		{
 			bool fanouttrip = false;
 			const unsigned long delay = QueueMessage(*stats, local, target, details, now, fanouttrip, kmerbonus);
+			if (!delay)
+			{
+				std::string reason;
+				if (earlytrip)
+					reason = "low-entropy";
+				if (reputationtrip)
+				{
+					if (!reason.empty())
+						reason += "+";
+					reason += "spammy-kmer";
+				}
+				if (kmerpenaltytrip)
+				{
+					if (!reason.empty())
+						reason += "+";
+					reason += "kmer-penalty";
+				}
+				if (fanouttrip)
+				{
+					if (!reason.empty())
+						reason += "+";
+					reason += "fanout";
+				}
+				if (reason.empty())
+					reason = "repeat-delay";
+
+				ServerInstance->Logs.Normal(MODNAME, "Dropping {} -> {} (reason={} exceeded tarpit_max={}s ratio={:.3f} weight={:.3f} spammy={:.3f} text='{}')",
+					user->nick, target.Get<User>()->nick, reason, tarpitmaxdelay, ratio, weightavg, spammy_ratio, details.text);
+				return MOD_RES_DENY;
+			}
 			std::string reason;
 			if (earlytrip)
 				reason = "low-entropy";
@@ -471,8 +501,11 @@ private:
 				delay += kmerbonus;
 		}
 
-		if (tarpitmaxdelay && delay > tarpitmaxdelay)
-			delay = tarpitmaxdelay;
+		if (tarpitmaxdelay && delay >= tarpitmaxdelay)
+		{
+			stats.last_delay = tarpitmaxdelay;
+			return 0;
+		}
 
 		if (delay < tarpitdelay)
 			delay = tarpitdelay;
