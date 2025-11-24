@@ -236,6 +236,16 @@ public:
 		ProcessQueues(curtime);
 	}
 
+	void OnUserDisconnect(LocalUser* user) override
+	{
+		auto* stats = userstats.Get(user);
+		if (stats)
+		{
+			stats->queue.clear();
+			stats->early_distinct.clear();
+		}
+	}
+
 private:
 	UserStats* GetStats(LocalUser* user)
 	{
@@ -373,14 +383,18 @@ private:
 			if (!stats)
 				continue;
 
+			// If user is quitting, clear queue immediately to free memory
+			if (user->quitting)
+			{
+				stats->queue.clear();
+				continue;
+			}
+
 			bool released = false;
 			while (!stats->queue.empty() && stats->queue.front().release <= now)
 			{
 				TarpitMessage msg = stats->queue.front();
 				stats->queue.pop_front();
-
-				if (user->quitting)
-					continue;
 
 				CommandBase::Params params;
 				params.push_back(msg.target);
