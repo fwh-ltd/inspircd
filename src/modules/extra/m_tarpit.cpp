@@ -114,6 +114,7 @@ public:
 	CommandTarpit(ModuleTarpit& mod);
 
 	CmdResult Handle(User* user, const Params& params) override;
+	void SendHelp(User* user);
 };
 
 class ModuleTarpit final
