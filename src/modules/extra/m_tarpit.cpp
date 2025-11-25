@@ -22,11 +22,13 @@
 #include "xline.h"
 #include "extension.h"
 #include <array>
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
 #include <deque>
 #include <limits>
+#include <vector>
 
 #ifdef USE_SYSTEM_UTFCPP
 # include <utf8cpp/utf8.h>
@@ -397,6 +399,7 @@ public:
 
 		unsigned long windowdelays = 0;
 		unsigned long windowdrops = 0;
+		unsigned long windowinspected = 0;
 		unsigned long long windowdelaytotal = 0;
 		insp::flat_map<std::string, unsigned long> windowreasons;
 
@@ -404,6 +407,7 @@ public:
 		{
 			if (cutoff && it->ts < cutoff)
 				break;
+			++windowinspected;
 			if (it->dropped)
 				++windowdrops;
 			else
@@ -414,24 +418,34 @@ public:
 			++windowreasons[it->reason];
 		}
 
-		double avgwindow = (windowdelays ? static_cast<double>(windowdelaytotal) / static_cast<double>(windowdelays) : 0.0);
-		double avgtotal = (totaldelayed ? static_cast<double>(totaldelay) / static_cast<double>(totaldelayed) : 0.0);
+		auto formatline = [](const char* label, unsigned long inspected, unsigned long delayed, unsigned long dropped, unsigned long long delaytotal)
+		{
+			double avgdelay = (delayed ? static_cast<double>(delaytotal) / static_cast<double>(delayed) : 0.0);
+			double delaypct = (inspected ? (static_cast<double>(delayed) / static_cast<double>(inspected)) * 100.0 : 0.0);
+			double droppct = (inspected ? (static_cast<double>(dropped) / static_cast<double>(inspected)) * 100.0 : 0.0);
+			return INSP_FORMAT("{} inspected={} delayed={} ({:.2f}%) dropped={} ({:.2f}%) avg_delay={:.2f}s",
+				label, inspected, delayed, delaypct, dropped, droppct, avgdelay);
+		};
 
-		user->WriteNotice(INSP_FORMAT("TARPIT: level={} ({}) inspected={} delayed={} dropped={} avg_delay={:.2f}s", currentlevel,
-			presets[currentlevel].name, totalinspected, totaldelayed, totaldropped, avgtotal));
+		user->WriteNotice(INSP_FORMAT("TARPIT: level={} ({}) {}", currentlevel, presets[currentlevel].name,
+			formatline("total", totalinspected, totaldelayed, totaldropped, totaldelay)));
 
 		if (window)
 		{
-			user->WriteNotice(INSP_FORMAT("TARPIT: last {}s delayed={} dropped={} avg_delay={:.2f}s", window, windowdelays, windowdrops, avgwindow));
+			user->WriteNotice(INSP_FORMAT("TARPIT: {}", formatline(INSP_FORMAT("last {}s", window), windowinspected, windowdelays, windowdrops, windowdelaytotal)));
 			if (!windowreasons.empty())
 			{
-				std::string reasonline = "TARPIT: reasons";
-				for (const auto& [reason, count] : windowreasons)
+				const unsigned long totalwindowevents = windowdelays + windowdrops;
+				std::vector<std::pair<std::string, unsigned long>> sortedreasons(windowreasons.begin(), windowreasons.end());
+				std::sort(sortedreasons.begin(), sortedreasons.end(), [](const auto& lhs, const auto& rhs)
 				{
-					reasonline.push_back(' ');
-					reasonline += reason + "=" + ConvToStr(count);
+					return lhs.second > rhs.second;
+				});
+				for (const auto& [reason, count] : sortedreasons)
+				{
+					double pct = (totalwindowevents ? (static_cast<double>(count) / static_cast<double>(totalwindowevents)) * 100.0 : 0.0);
+					user->WriteNotice(INSP_FORMAT("TARPIT: {:+07.2f}% {:>5} {}", pct, count, reason));
 				}
-				user->WriteNotice(reasonline);
 			}
 		}
 	}
@@ -1193,7 +1207,7 @@ CommandTarpit::CommandTarpit(ModuleTarpit& mod)
 	, parent(mod)
 {
 	access_needed = CmdAccess::OPERATOR;
-	syntax = { "STATS [seconds]", "CONFIG GET [key]", "CONFIG SET <key> <value>" };
+	syntax = { "HELP", "STATS [seconds]", "CONFIG GET [key]", "CONFIG SET <key> <value>" };
 }
 
 CmdResult CommandTarpit::Handle(User* user, const Params& params)
@@ -1203,13 +1217,18 @@ CmdResult CommandTarpit::Handle(User* user, const Params& params)
 
 	if (params.empty())
 	{
-		user->WriteNotice("TARPIT: STATS [seconds] | CONFIG GET [key] | CONFIG SET <key> <value>");
-		return CmdResult::FAILURE;
+		SendHelp(user);
+		return CmdResult::SUCCESS;
 	}
 
 	std::string sub = params[0];
 	std::transform(sub.begin(), sub.end(), sub.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-	if (sub == "stats")
+	if (sub == "help")
+	{
+		SendHelp(user);
+		return CmdResult::SUCCESS;
+	}
+	else if (sub == "stats")
 	{
 		unsigned long window = 300;
 		if (params.size() > 1)
@@ -1259,6 +1278,12 @@ CmdResult CommandTarpit::Handle(User* user, const Params& params)
 
 	user->WriteNotice("TARPIT: unknown subcommand");
 	return CmdResult::FAILURE;
+}
+
+void CommandTarpit::SendHelp(User* user)
+{
+	user->WriteNotice("TARPIT: HELP | STATS [seconds] | CONFIG GET [key] | CONFIG SET <key> <value>");
+	user->WriteNotice("HELP: /TARPIT stats [seconds] shows recent hit rate; \x02config\x02 adjusts runtime knobs.");
 }
 
 MODULE_INIT(ModuleTarpit)
