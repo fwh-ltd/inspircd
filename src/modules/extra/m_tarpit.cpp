@@ -235,7 +235,6 @@ public:
 	{
 		for (unsigned int i = 0; i < levelsettings.size(); ++i)
 			levelsettings[i] = BuildDefaultSettings(i);
-		ServerInstance->Modules.AddService(command);
 	}
 
 	void ReadConfig(ConfigStatus& status) override
