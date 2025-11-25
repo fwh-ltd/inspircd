@@ -84,6 +84,7 @@ namespace
 		std::deque<TarpitMessage> queue;
 		std::deque<FanoutHit> fanout_recent;
 		insp::flat_map<std::string, size_t> fanout_counts;
+		time_t connected = 0;
 	};
 
 	bool IsZeroWidth(uint32_t cp)
@@ -138,14 +139,21 @@ private:
 		double kmer_penalty_min_ratio;
 		double kmer_penalty_min_score;
 		unsigned long reputation_ttl;
+		double interaction_low_weight;
+		double interaction_spammy_weight;
+		double interaction_penalty_weight;
+		unsigned int interaction_min_signals;
+		double interaction_exponent;
+		unsigned long trust_decay;
+		double trust_weight;
 	};
 
 	static constexpr Preset presets[5] = {
-		{ "monitor", 1, 1.0, 60, 0.90, 0.70, 12.0, 0,   0.0, 1.0, 0.00,  0, 0.95, 10.0, 1200 },
-		{ "low",     2, 1.05,120, 0.75, 0.60, 10.5,20,  0.5, 1.5, 0.02, 30, 0.75, 5.0,  900 },
-		{ "medium",  3, 1.10,300, 0.60, 0.50,  9.8,40,  1.0, 2.0, 0.05, 60, 0.60, 3.0,  600 },
-		{ "high",    4, 1.15,300, 0.50, 0.45,  9.4,60,  2.0, 3.0, 0.10, 90, 0.50, 2.0,  450 },
-		{ "extreme", 5, 1.20,300, 0.40, 0.40,  9.0,60,  3.0, 4.0, 0.20,120, 0.40, 1.0,  300 }
+		{ "monitor", 1, 1.0, 60, 0.90, 0.70, 12.0, 0,   0.0, 1.0, 0.00,  0, 0.95, 10.0, 1200, 0.0, 0.0, 0.0, 3, 1.0, 0, 0.0 },
+		{ "low",     1, 1.05,120, 0.75, 0.60, 10.5,20,  0.5, 1.5, 0.02, 30, 0.75, 5.0,  900, 0.5, 0.8, 0.4, 2, 1.2, 300, 0.5 },
+		{ "medium",  1, 1.10,300, 0.60, 0.50,  9.8,40,  1.0, 2.0, 0.05, 60, 0.60, 3.0,  600, 0.8, 1.2, 0.7, 2, 1.4, 600, 0.8 },
+		{ "high",    2, 1.15,300, 0.50, 0.45,  9.4,60,  2.0, 3.0, 0.10, 90, 0.50, 2.0,  450, 1.0, 1.6, 1.0, 2, 1.6, 900, 1.0 },
+		{ "extreme", 3, 1.20,300, 0.40, 0.40,  9.0,60,  3.0, 4.0, 0.20,120, 0.40, 1.0,  300, 1.2, 1.9, 1.2, 2, 1.8, 1200, 1.2 }
 	};
 
 	struct LevelSettings final
@@ -174,6 +182,13 @@ private:
 		unsigned long glineduration = 3600;
 		std::string exemptmodes = "CoaA";
 		std::string trustedmodes = "Vr";
+		double interactionlowweight = 0.0;
+		double interactionspammyweight = 0.0;
+		double interactionpenaltyweight = 0.0;
+		unsigned int interactionminsignals = 2;
+		double interactionexponent = 1.0;
+		unsigned long trustdecay = 0;
+		double trustweight = 0.0;
 	};
 
 	struct StatSample final
@@ -215,6 +230,7 @@ private:
 
 	unsigned long glineduration = 3600;
 	unsigned long totalobservations = 0;
+	unsigned long long totalprocessed = 0;
 	std::string exemptmodes = "CoaA";
 	std::string trustedmodes = "Vr";
 	time_t lastcachecleanup = 0;
@@ -226,9 +242,20 @@ private:
 	unsigned long long totaldelay = 0;
 	std::deque<StatSample> recentevents;
 	insp::flat_map<std::string, unsigned long> reasoncounts;
+	unsigned long statseventwindow = 900;
+	size_t statseventmax = 1000;
+	bool warmupannounced = false;
+	std::deque<time_t> inspectedhistory;
 
 	CommandTarpit command;
 	std::array<LevelSettings, std::size(presets)> levelsettings;
+	double interactionlowweight = 0.0;
+	double interactionspammyweight = 0.0;
+	double interactionpenaltyweight = 0.0;
+	unsigned int interactionminsignals = 2;
+	double interactionexponent = 1.0;
+	unsigned long trustdecay = 0;
+	double trustweight = 0.0;
 
 public:
 	ModuleTarpit()
@@ -249,6 +276,8 @@ public:
 		for (auto it = tags.begin(); it != tags.end(); ++it)
 		{
 			const std::shared_ptr<ConfigTag>& tag = it->second;
+			statseventwindow = tag->getDuration("stats_window", statseventwindow, 60, 7200);
+			statseventmax = tag->getNum<size_t>("stats_max_events", statseventmax, 10, 5000);
 			const unsigned int lvl = tag->getNum<unsigned int>("level", std::numeric_limits<unsigned int>::max(), 0, static_cast<unsigned int>(levelsettings.size() - 1));
 			if (lvl >= levelsettings.size())
 				throw ModuleException(this, "<tarpit> tags must include level=\"0-4\"");
@@ -259,6 +288,7 @@ public:
 		}
 
 		ApplyPreset(requestedlevel, false);
+		warmupannounced = (warmupobservations == 0);
 	}
 
 	ModResult OnUserPreMessage(User* user, MessageTarget& target, MessageDetails& details) override
@@ -273,6 +303,7 @@ public:
 		if (target.type != MessageTarget::TYPE_USER)
 			return MOD_RES_PASSTHRU;
 
+		++totalprocessed;
 		UserStats* stats = GetStats(local);
 		if (stats->bypass)
 		{
@@ -294,8 +325,11 @@ public:
 		if (totalobservations < warmupobservations)
 		{
 			UpdateCache(kmers, now);
-			if (totalobservations >= warmupobservations / 2 && totalobservations + kmers.size() >= warmupobservations)
+			if (!warmupannounced && warmupobservations && totalobservations >= warmupobservations)
+			{
+				warmupannounced = true;
 				ServerInstance->Logs.Normal(MODNAME, "m_tarpit warm-up complete ({} observations)", warmupobservations);
+			}
 			return MOD_RES_PASSTHRU;
 		}
 
@@ -307,6 +341,9 @@ public:
 		const double weightavg = GetWeightAverage(*stats, msgweight);
 
 		UpdateCache(kmers, now);
+		inspectedhistory.push_back(now);
+		while (!inspectedhistory.empty() && (now - inspectedhistory.front()) > static_cast<time_t>(statseventwindow))
+			inspectedhistory.pop_front();
 
 		const bool earlytrip = (stats->early_messages <= earlymaxmessages)
 			&& (ratio < earlyratio) && (weightavg < earlyweight);
@@ -318,6 +355,9 @@ public:
 		const bool fanouttrip = (fanoutbonus > 0);
 		const unsigned long kmerbonus = CalculateKmerPenalty(kmers, spammy_ratio, now);
 		const bool kmertrip = (kmerbonus > 0);
+		const double interactionboost = CalculateInteractionBoost(earlytrip, reputationtrip, kmertrip);
+		const double trustboost = CalculateTrustBoost(*stats, now);
+		const double totalboost = interactionboost * trustboost;
 
 		bool shoulddelay = (now < stats->tarpit_until) || earlytrip || reputationtrip || fanouttrip || kmertrip;
 		if (!shoulddelay)
@@ -333,7 +373,7 @@ public:
 		}
 
 		bool dropped = false;
-		const unsigned long delay = QueueMessage(*stats, local, target, details, now, fanoutbonus, kmerbonus, dropped);
+		const unsigned long delay = QueueMessage(*stats, local, target, details, now, totalboost, fanoutbonus, kmerbonus, dropped);
 
 		std::string reason;
 		if (earlytrip)
@@ -359,20 +399,21 @@ public:
 		if (reason.empty())
 			reason = (now < stats->tarpit_until ? "repeat-delay" : "heuristic");
 
+		const std::string interactionnote = (totalboost > 1.01 ? INSP_FORMAT(" interaction={:.2f}x", totalboost) : "");
 		if (dropped)
 		{
 			++totaldropped;
 			RecordEvent(true, delay, reason);
-			ServerInstance->Logs.Normal(MODNAME, "Dropping {} -> {} (reason={} exceeded tarpit_max={}s ratio={:.3f} weight={:.3f} spammy={:.3f} text='{}')",
-				user->nick, destnick, reason, tarpitmaxdelay, ratio, weightavg, spammy_ratio, details.text);
+			ServerInstance->Logs.Normal(MODNAME, "Dropping {} -> {} (reason={}{} exceeded tarpit_max={}s ratio={:.3f} weight={:.3f} spammy={:.3f} text='{}')",
+				user->nick, destnick, reason, interactionnote, tarpitmaxdelay, ratio, weightavg, spammy_ratio, details.text);
 			return MOD_RES_DENY;
 		}
 
 		++totaldelayed;
 		totaldelay += delay;
 		RecordEvent(false, delay, reason);
-		ServerInstance->Logs.Normal(MODNAME, "Tarpitting {} -> {} for {}s (reason={} ratio={:.3f} weight={:.3f} spammy={:.3f} text='{}')",
-			user->nick, destnick, delay, reason, ratio, weightavg, spammy_ratio, details.text);
+		ServerInstance->Logs.Normal(MODNAME, "Tarpitting {} -> {} for {}s (reason={}{} ratio={:.3f} weight={:.3f} spammy={:.3f} text='{}')",
+			user->nick, destnick, delay, reason, interactionnote, ratio, weightavg, spammy_ratio, details.text);
 
 		return MOD_RES_DENY;
 	}
@@ -400,7 +441,7 @@ public:
 
 		unsigned long windowdelays = 0;
 		unsigned long windowdrops = 0;
-		unsigned long windowinspected = 0;
+		unsigned long long windowprocessed = 0;
 		unsigned long long windowdelaytotal = 0;
 		insp::flat_map<std::string, unsigned long> windowreasons;
 
@@ -408,7 +449,6 @@ public:
 		{
 			if (cutoff && it->ts < cutoff)
 				break;
-			++windowinspected;
 			if (it->dropped)
 				++windowdrops;
 			else
@@ -419,21 +459,31 @@ public:
 			++windowreasons[it->reason];
 		}
 
-		auto formatline = [](const char* label, unsigned long inspected, unsigned long delayed, unsigned long dropped, unsigned long long delaytotal)
+		if (window)
+		{
+			for (auto it = inspectedhistory.rbegin(); it != inspectedhistory.rend(); ++it)
+			{
+				if (cutoff && *it < cutoff)
+					break;
+				++windowprocessed;
+			}
+		}
+
+		auto formatline = [](const std::string& label, unsigned long long processed, unsigned long long delayed, unsigned long long dropped, unsigned long long delaytotal)
 		{
 			double avgdelay = (delayed ? static_cast<double>(delaytotal) / static_cast<double>(delayed) : 0.0);
-			double delaypct = (inspected ? (static_cast<double>(delayed) / static_cast<double>(inspected)) * 100.0 : 0.0);
-			double droppct = (inspected ? (static_cast<double>(dropped) / static_cast<double>(inspected)) * 100.0 : 0.0);
-			return INSP_FORMAT("{} inspected={} delayed={} ({:.2f}%) dropped={} ({:.2f}%) avg_delay={:.2f}s",
-				label, inspected, delayed, delaypct, dropped, droppct, avgdelay);
+			double delaypct = (processed ? (static_cast<double>(delayed) / static_cast<double>(processed)) * 100.0 : 0.0);
+			double droppct = (processed ? (static_cast<double>(dropped) / static_cast<double>(processed)) * 100.0 : 0.0);
+			return INSP_FORMAT("{} processed={} delayed={} ({:.2f}%) dropped={} ({:.2f}%) avg_delay={:.2f}s",
+				label, processed, delayed, delaypct, dropped, droppct, avgdelay);
 		};
 
 		user->WriteNotice(INSP_FORMAT("TARPIT: level={} ({}) {}", currentlevel, presets[currentlevel].name,
-			formatline("total", totalinspected, totaldelayed, totaldropped, totaldelay).c_str()));
+			formatline("total", totalprocessed, totaldelayed, totaldropped, totaldelay)));
 
 		if (window)
 		{
-			user->WriteNotice(INSP_FORMAT("TARPIT: {}", formatline(INSP_FORMAT("last {}s", window).c_str(), windowinspected, windowdelays, windowdrops, windowdelaytotal)));
+			user->WriteNotice(INSP_FORMAT("TARPIT: {}", formatline(INSP_FORMAT("last {}s", window), windowprocessed, windowdelays, windowdrops, windowdelaytotal)));
 			if (!windowreasons.empty())
 			{
 				const unsigned long totalwindowevents = windowdelays + windowdrops;
@@ -493,6 +543,20 @@ public:
 			value = ConvToStr(kmerpenaltyminratio);
 		else if (lower == "kmer_penalty_min_score")
 			value = ConvToStr(kmerpenaltyminscore);
+		else if (lower == "interaction_low_weight")
+			value = ConvToStr(interactionlowweight);
+		else if (lower == "interaction_spammy_weight")
+			value = ConvToStr(interactionspammyweight);
+		else if (lower == "interaction_penalty_weight")
+			value = ConvToStr(interactionpenaltyweight);
+		else if (lower == "interaction_min_signals")
+			value = ConvToStr(interactionminsignals);
+		else if (lower == "interaction_exponent")
+			value = ConvToStr(interactionexponent);
+		else if (lower == "stats_window")
+			value = ConvToStr(statseventwindow);
+		else if (lower == "stats_max_events")
+			value = ConvToStr(statseventmax);
 		else
 		{
 			user->WriteNotice("TARPIT: Unknown config key " + key);
@@ -521,6 +585,7 @@ public:
 					throw ModuleException(this, "invalid level");
 				ApplyPreset(lvl, true);
 				ServerInstance->SNO.WriteGlobalSno('a', "m_tarpit: {} set level {} ({}).", user->nick, lvl, presets[lvl].name);
+				user->WriteNotice(INSP_FORMAT("TARPIT: {} set to {}", lower, lvl));
 				return true;
 			}
 			else if (lower == "delay")
@@ -583,6 +648,48 @@ public:
 				SetNumeric(user, kmerpenaltyminscore, value, 0.0, 1000.0, "k-mer min score");
 				CurrentLevelSettings().kmerpenaltyminscore = kmerpenaltyminscore;
 			}
+			else if (lower == "interaction_low_weight")
+			{
+				SetNumeric(user, interactionlowweight, value, 0.0, 10.0, "interaction low weight");
+				CurrentLevelSettings().interactionlowweight = interactionlowweight;
+			}
+			else if (lower == "interaction_spammy_weight")
+			{
+				SetNumeric(user, interactionspammyweight, value, 0.0, 10.0, "interaction spammy weight");
+				CurrentLevelSettings().interactionspammyweight = interactionspammyweight;
+			}
+			else if (lower == "interaction_penalty_weight")
+			{
+				SetNumeric(user, interactionpenaltyweight, value, 0.0, 10.0, "interaction penalty weight");
+				CurrentLevelSettings().interactionpenaltyweight = interactionpenaltyweight;
+			}
+			else if (lower == "interaction_min_signals")
+			{
+				unsigned long parsed = 0;
+				if (!ParseUnsigned(value, parsed) || parsed < 1 || parsed > 3)
+					throw ModuleException(this, "invalid interaction_min_signals");
+				interactionminsignals = static_cast<unsigned int>(parsed);
+				CurrentLevelSettings().interactionminsignals = interactionminsignals;
+			}
+			else if (lower == "interaction_exponent")
+			{
+				SetNumeric(user, interactionexponent, value, 0.5, 5.0, "interaction exponent");
+				CurrentLevelSettings().interactionexponent = interactionexponent;
+			}
+			else if (lower == "stats_window")
+			{
+				unsigned long parsed = 0;
+				if (!ParseUnsigned(value, parsed) || parsed < 60 || parsed > 7200)
+					throw ModuleException(this, "invalid stats window");
+				statseventwindow = parsed;
+			}
+			else if (lower == "stats_max_events")
+			{
+				unsigned long parsed = 0;
+				if (!ParseUnsigned(value, parsed) || parsed < 10 || parsed > 5000)
+					throw ModuleException(this, "invalid stats max events");
+				statseventmax = static_cast<size_t>(parsed);
+			}
 			else
 			{
 				user->WriteNotice("TARPIT: Unknown key " + key);
@@ -596,6 +703,7 @@ public:
 		}
 
 		ServerInstance->SNO.WriteGlobalSno('a', "m_tarpit: {} set {} to {}", user->nick, lower, value);
+		user->WriteNotice(INSP_FORMAT("TARPIT: {} set to {}", lower, value));
 		return true;
 	}
 
@@ -612,8 +720,8 @@ private:
 
 		while (!recentevents.empty())
 		{
-			const time_t cutoff = ServerInstance->Time() - 900;
-			if (recentevents.front().ts >= cutoff && recentevents.size() <= 200)
+			const time_t cutoff = ServerInstance->Time() - static_cast<time_t>(statseventwindow);
+			if (recentevents.front().ts >= cutoff && recentevents.size() <= statseventmax)
 				break;
 			recentevents.pop_front();
 		}
@@ -650,6 +758,13 @@ private:
 		glineduration = settings.glineduration;
 		exemptmodes = settings.exemptmodes;
 		trustedmodes = settings.trustedmodes;
+		interactionlowweight = settings.interactionlowweight;
+		interactionspammyweight = settings.interactionspammyweight;
+		interactionpenaltyweight = settings.interactionpenaltyweight;
+		interactionminsignals = settings.interactionminsignals;
+		interactionexponent = settings.interactionexponent;
+		trustdecay = settings.trustdecay;
+		trustweight = settings.trustweight;
 		currentlevel = level;
 
 		if (announce)
@@ -680,6 +795,13 @@ private:
 		settings.kmerpenaltyminratio = preset.kmer_penalty_min_ratio;
 		settings.kmerpenaltyminscore = preset.kmer_penalty_min_score;
 		settings.reputationttl = preset.reputation_ttl;
+		settings.interactionlowweight = preset.interaction_low_weight;
+		settings.interactionspammyweight = preset.interaction_spammy_weight;
+		settings.interactionpenaltyweight = preset.interaction_penalty_weight;
+		settings.interactionminsignals = preset.interaction_min_signals;
+		settings.interactionexponent = preset.interaction_exponent;
+		settings.trustdecay = preset.trust_decay;
+		settings.trustweight = preset.trust_weight;
 		return settings;
 	}
 
@@ -737,6 +859,13 @@ private:
 		settings.glineduration = tag->getDuration("gline_duration", settings.glineduration, 60, 86400);
 		settings.exemptmodes = tag->getString("exemptmodes", settings.exemptmodes);
 		settings.trustedmodes = tag->getString("trustedmodes", settings.trustedmodes);
+		settings.interactionlowweight = tag->getNum<double>("interaction_low_weight", settings.interactionlowweight, 0.0, 10.0);
+		settings.interactionspammyweight = tag->getNum<double>("interaction_spammy_weight", settings.interactionspammyweight, 0.0, 10.0);
+		settings.interactionpenaltyweight = tag->getNum<double>("interaction_penalty_weight", settings.interactionpenaltyweight, 0.0, 10.0);
+		settings.interactionminsignals = tag->getNum<unsigned int>("interaction_min_signals", settings.interactionminsignals, 1, 3);
+		settings.interactionexponent = tag->getNum<double>("interaction_exponent", settings.interactionexponent, 0.5, 5.0);
+		settings.trustdecay = tag->getDuration("trust_decay", settings.trustdecay, 0, 7200);
+		settings.trustweight = tag->getNum<double>("trust_weight", settings.trustweight, 0.0, 5.0);
 
 		const std::string actionstr = tag->getString("action", ActionToString(settings.action));
 		settings.action = ParseAction(actionstr);
@@ -747,6 +876,47 @@ private:
 		if (currentlevel >= levelsettings.size())
 			currentlevel = static_cast<unsigned int>(levelsettings.size() - 1);
 		return levelsettings[currentlevel];
+	}
+
+	double CalculateInteractionBoost(bool lowentropy, bool spammy, bool penalty) const
+	{
+		unsigned int signals = 0;
+		if (lowentropy)
+			++signals;
+		if (spammy)
+			++signals;
+		if (penalty)
+			++signals;
+		if (signals < interactionminsignals)
+			return 1.0;
+
+		double product = 1.0;
+		if (lowentropy && interactionlowweight > 0.0)
+			product *= (1.0 + interactionlowweight);
+		if (spammy && interactionspammyweight > 0.0)
+			product *= (1.0 + interactionspammyweight);
+		if (penalty && interactionpenaltyweight > 0.0)
+			product *= (1.0 + interactionpenaltyweight);
+
+		if (product <= 0.0 || interactionexponent <= 0.0)
+			return 1.0;
+		double boost = std::pow(product, interactionexponent);
+		if (!std::isfinite(boost) || boost < 1.0)
+			return 1.0;
+		return boost;
+	}
+
+	double CalculateTrustBoost(const UserStats& stats, time_t now) const
+	{
+		if (!trustweight || !trustdecay || !stats.connected)
+			return 1.0;
+		double age = static_cast<double>(now - stats.connected);
+		if (age <= 0.0)
+			age = 0.0;
+		if (age >= static_cast<double>(trustdecay))
+			return 1.0;
+		double factor = 1.0 + trustweight * (1.0 - (age / static_cast<double>(trustdecay)));
+		return (factor < 1.0 ? 1.0 : factor);
 	}
 
 	bool ParseUnsigned(const std::string& text, unsigned long& out) const
@@ -778,6 +948,7 @@ private:
 		if (!stats)
 		{
 			stats = new UserStats;
+			stats->connected = user->signon;
 			userstats.Set(user, stats);
 		}
 		return stats;
@@ -924,7 +1095,7 @@ private:
 	}
 
 	unsigned long QueueMessage(UserStats& stats, LocalUser* user, MessageTarget& target, MessageDetails& details, time_t now,
-		unsigned long fanoutbonus, unsigned long kmerbonus, bool& dropped)
+		double interactionboost, unsigned long fanoutbonus, unsigned long kmerbonus, bool& dropped)
 	{
 		dropped = false;
 
@@ -937,7 +1108,7 @@ private:
 		pending.target = dest->nick;
 		pending.message = details.text;
 
-		double delay = tarpitdelay;
+		double delay = tarpitdelay * interactionboost;
 		if (now < stats.tarpit_until && stats.last_delay)
 			delay = stats.last_delay;
 
