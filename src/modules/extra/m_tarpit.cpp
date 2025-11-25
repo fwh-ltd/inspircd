@@ -497,7 +497,7 @@ public:
 			{
 				unsigned int lvl = ConvToNum<unsigned int>(value);
 				if (lvl >= std::size(presets))
-					throw ModuleException("invalid level");
+					throw ModuleException(this, "invalid level");
 				ApplyPreset(lvl, true);
 				ServerInstance->SNO.WriteGlobalSno('a', "m_tarpit: {} set level {} ({}).", user->nick, lvl, presets[lvl].name);
 				return true;
