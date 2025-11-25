@@ -99,20 +99,20 @@ namespace
 	}
 }
 
-class ModuleKmerSpam;
+class ModuleTarpit;
 
 class CommandTarpit final
 	: public Command
 {
-	ModuleKmerSpam& parent;
+	ModuleTarpit& parent;
 
 public:
-	CommandTarpit(ModuleKmerSpam& mod);
+	CommandTarpit(ModuleTarpit& mod);
 
 	CmdResult Handle(User* user, const Params& params) override;
 };
 
-class ModuleKmerSpam final
+class ModuleTarpit final
 	: public Module
 {
 private:
@@ -226,9 +226,9 @@ private:
 	std::array<LevelSettings, std::size(presets)> levelsettings;
 
 public:
-	ModuleKmerSpam()
+	ModuleTarpit()
 		: Module(VF_VENDOR, "Detects duplicate private-message spam using k-mer fingerprints.")
-		, userstats(this, "kmerspam-stats", ExtensionType::USER, true)
+		, userstats(this, "tarpit-stats", ExtensionType::USER, true)
 		, command(*this)
 	{
 		for (unsigned int i = 0; i < levelsettings.size(); ++i)
@@ -378,7 +378,7 @@ public:
 		ProcessQueues(curtime);
 	}
 
-	void OnUserDisconnect(LocalUser* user, const std::string&) override
+	void OnUserDisconnect(LocalUser* user) override
 	{
 		auto* stats = userstats.Get(user);
 		if (stats)
@@ -1167,7 +1167,7 @@ public:
 	friend class CommandTarpit;
 };
 
-CommandTarpit::CommandTarpit(ModuleKmerSpam& mod)
+CommandTarpit::CommandTarpit(ModuleTarpit& mod)
 	: Command(&mod, "TARPIT", 1)
 	, parent(mod)
 {
@@ -1242,4 +1242,4 @@ CmdResult CommandTarpit::Handle(User* user, const Params& params)
 	return CmdResult::FAILURE;
 }
 
-MODULE_INIT(ModuleKmerSpam)
+MODULE_INIT(ModuleTarpit)
