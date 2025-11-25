@@ -235,6 +235,7 @@ public:
 	{
 		for (unsigned int i = 0; i < levelsettings.size(); ++i)
 			levelsettings[i] = BuildDefaultSettings(i);
+		ServerInstance->Modules.AddService(command);
 	}
 
 	void ReadConfig(ConfigStatus& status) override
@@ -291,6 +292,8 @@ public:
 		if (totalobservations < warmupobservations)
 		{
 			UpdateCache(kmers, now);
+			if (totalobservations >= warmupobservations / 2 && totalobservations + kmers.size() >= warmupobservations)
+				ServerInstance->Logs.Normal(MODNAME, "m_tarpit warm-up complete ({} observations)", warmupobservations);
 			return MOD_RES_PASSTHRU;
 		}
 
