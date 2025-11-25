@@ -414,12 +414,12 @@ public:
 		double avgwindow = (windowdelays ? static_cast<double>(windowdelaytotal) / static_cast<double>(windowdelays) : 0.0);
 		double avgtotal = (totaldelayed ? static_cast<double>(totaldelay) / static_cast<double>(totaldelayed) : 0.0);
 
-		user->WriteNotice(InspIRCd::Format("TARPIT: level=%u (%s) inspected=%llu delayed=%llu dropped=%llu avg_delay=%.2fs", currentlevel,
+		user->WriteNotice(INSP_FORMAT("TARPIT: level={} ({}) inspected={} delayed={} dropped={} avg_delay={:.2f}s", currentlevel,
 			presets[currentlevel].name, totalinspected, totaldelayed, totaldropped, avgtotal));
 
 		if (window)
 		{
-			user->WriteNotice(InspIRCd::Format("TARPIT: last %us delayed=%lu dropped=%lu avg_delay=%.2fs", window, windowdelays, windowdrops, avgwindow));
+			user->WriteNotice(INSP_FORMAT("TARPIT: last {}s delayed={} dropped={} avg_delay={:.2f}s", window, windowdelays, windowdrops, avgwindow));
 			if (!windowreasons.empty())
 			{
 				std::string reasonline = "TARPIT: reasons";
@@ -440,7 +440,7 @@ public:
 
 		if (key.empty())
 		{
-			user->WriteNotice(InspIRCd::Format("TARPIT config: level=%u (%s) delay=%.2fs multiplier=%.2f max_delay=%lus spammy_threshold=%.2f early_ratio=%.2f fanout_delay=%.2f fanout_multiplier=%.2f fanout_window=%lus kmer_penalty=%.2f kmer_cap=%lus",
+			user->WriteNotice(INSP_FORMAT("TARPIT config: level={} ({}) delay={:.2f}s multiplier={:.2f} max_delay={}s spammy_threshold={:.2f} early_ratio={:.2f} fanout_delay={:.2f} fanout_multiplier={:.2f} fanout_window={}s kmer_penalty={:.2f} kmer_cap={}s",
 				currentlevel, presets[currentlevel].name, tarpitdelay, tarpitmultiplier, tarpitmaxdelay,
 				spammythreshold, earlyratio, fanoutdelay, fanoutmultiplier, fanoutwindow, kmerpenalty, kmerpenaltycap));
 			return;
