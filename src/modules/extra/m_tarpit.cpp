@@ -378,7 +378,7 @@ public:
 		ProcessQueues(curtime);
 	}
 
-	void OnUserQuit(LocalUser* user, const std::string&, const std::string&) override
+	void OnUserDisconnect(LocalUser* user, const std::string&) override
 	{
 		auto* stats = userstats.Get(user);
 		if (stats)
