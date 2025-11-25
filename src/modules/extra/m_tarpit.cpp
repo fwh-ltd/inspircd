@@ -20,9 +20,10 @@
 #include "numerichelper.h"
 #include "timeutils.h"
 #include "xline.h"
-#include "extension.h"
+#include <array>
 #include <cmath>
 #include <deque>
+#include <limits>
 
 #ifdef USE_SYSTEM_UTFCPP
 # include <utf8cpp/utf8.h>
@@ -32,8 +33,7 @@
 
 namespace
 {
-	enum class SpamAction
-		: uint8_t
+	enum class SpamAction : uint8_t
 	{
 		DELAY,
 		BLOCK,
@@ -61,6 +61,12 @@ namespace
 		time_t release = 0;
 	};
 
+	struct FanoutHit final
+	{
+		std::string target;
+		time_t time = 0;
+	};
+
 	struct UserStats final
 	{
 		size_t early_messages = 0;
@@ -68,8 +74,11 @@ namespace
 		insp::flat_set<std::string> early_distinct;
 		double early_weight_sum = 0.0;
 		time_t tarpit_until = 0;
+		unsigned long last_delay = 0;
 		bool bypass = false;
 		std::deque<TarpitMessage> queue;
+		std::deque<FanoutHit> fanout_recent;
+		insp::flat_map<std::string, size_t> fanout_counts;
 	};
 
 	bool IsZeroWidth(uint32_t cp)
@@ -89,14 +98,93 @@ namespace
 	}
 }
 
+class ModuleKmerSpam;
+
+class CommandTarpit final
+	: public Command
+{
+	ModuleKmerSpam& parent;
+
+public:
+	CommandTarpit(ModuleKmerSpam& mod);
+
+	CmdResult Handle(User* user, const Params& params) override;
+};
+
 class ModuleKmerSpam final
 	: public Module
 {
 private:
+	struct Preset final
+	{
+		const char* name;
+		unsigned long delay;
+		double multiplier;
+		unsigned long maxdelay;
+		double spammy_threshold;
+		double early_ratio;
+		double early_weight;
+		unsigned long fanout_window;
+		double fanout_delay;
+		double fanout_multiplier;
+		double kmer_penalty;
+		unsigned long kmer_penalty_cap;
+		double kmer_penalty_min_ratio;
+		double kmer_penalty_min_score;
+		unsigned long reputation_ttl;
+	};
+
+	static constexpr Preset presets[5] = {
+		{ "monitor", 1, 1.0, 60, 0.90, 0.70, 12.0, 0,   0.0, 1.0, 0.00,  0, 0.95, 10.0, 1200 },
+		{ "low",     2, 1.05,120, 0.75, 0.60, 10.5,20,  0.5, 1.5, 0.02, 30, 0.75, 5.0,  900 },
+		{ "medium",  3, 1.10,300, 0.60, 0.50,  9.8,40,  1.0, 2.0, 0.05, 60, 0.60, 3.0,  600 },
+		{ "high",    4, 1.15,300, 0.50, 0.45,  9.4,60,  2.0, 3.0, 0.10, 90, 0.50, 2.0,  450 },
+		{ "extreme", 5, 1.20,300, 0.40, 0.40,  9.0,60,  3.0, 4.0, 0.20,120, 0.40, 1.0,  300 }
+	};
+
+	struct LevelSettings final
+	{
+		SpamAction action = SpamAction::DELAY;
+		size_t kmersize = 4;
+		size_t minlength = 12;
+		size_t earlymaxmessages = 10;
+		double earlyratio = 0.35;
+		double earlyweight = 9.2;
+		double spammythreshold = 0.30;
+		size_t maxcachesize = 100000;
+		unsigned long cachettl = 600;
+		unsigned long reputationttl = 900;
+		size_t warmupobservations = 5000;
+		double tarpitdelay = 4;
+		double tarpitmultiplier = 1.1;
+		unsigned long tarpitmaxdelay = 300;
+		double fanoutdelay = 1.0;
+		double fanoutmultiplier = 2.0;
+		unsigned long fanoutwindow = 30;
+		double kmerpenalty = 0.05;
+		unsigned long kmerpenaltycap = 60;
+		double kmerpenaltyminratio = 0.6;
+		double kmerpenaltyminscore = 3.0;
+		unsigned long glineduration = 3600;
+		std::string exemptmodes = "CoaA";
+		std::string trustedmodes = "Vr";
+	};
+
+	struct StatSample final
+	{
+		time_t ts = 0;
+		unsigned long delay = 0;
+		bool dropped = false;
+		std::string reason;
+	};
+
 	insp::flat_map<std::string, KmerData> cache;
 	insp::flat_map<std::string, ReputationEntry> reputation;
 	SimpleExtItem<UserStats> userstats;
+
 	SpamAction action = SpamAction::DELAY;
+	unsigned int currentlevel = 2;
+
 	size_t kmersize = 4;
 	size_t minlength = 12;
 	size_t earlymaxmessages = 10;
@@ -106,9 +194,19 @@ private:
 	size_t maxcachesize = 100000;
 	unsigned long cachettl = 600;
 	unsigned long reputationttl = 900;
-	unsigned long tarpitdelay = 10;
-	double tarpitmultiplier = 2.0;
-	unsigned long tarpitmaxdelay = 0;
+	size_t warmupobservations = 5000;
+
+	double tarpitdelay = 4;
+	double tarpitmultiplier = 1.1;
+	unsigned long tarpitmaxdelay = 300;
+	double fanoutdelay = 1.0;
+	double fanoutmultiplier = 2.0;
+	unsigned long fanoutwindow = 30;
+	double kmerpenalty = 0.05;
+	unsigned long kmerpenaltycap = 60;
+	double kmerpenaltyminratio = 0.6;
+	double kmerpenaltyminscore = 3.0;
+
 	unsigned long glineduration = 3600;
 	unsigned long totalobservations = 0;
 	std::string exemptmodes = "CoaA";
@@ -116,42 +214,46 @@ private:
 	time_t lastcachecleanup = 0;
 	time_t lastreputationcleanup = 0;
 
+	unsigned long long totalinspected = 0;
+	unsigned long long totaldelayed = 0;
+	unsigned long long totaldropped = 0;
+	unsigned long long totaldelay = 0;
+	std::deque<StatSample> recentevents;
+	insp::flat_map<std::string, unsigned long> reasoncounts;
+
+	CommandTarpit command;
+	std::array<LevelSettings, std::size(presets)> levelsettings;
+
 public:
 	ModuleKmerSpam()
 		: Module(VF_VENDOR, "Detects duplicate private-message spam using k-mer fingerprints.")
 		, userstats(this, "kmerspam-stats", ExtensionType::USER, true)
+		, command(*this)
 	{
+		for (unsigned int i = 0; i < levelsettings.size(); ++i)
+			levelsettings[i] = BuildDefaultSettings(i);
+		ServerInstance->Modules.AddService(command);
 	}
 
 	void ReadConfig(ConfigStatus& status) override
 	{
-		const auto& tag = ServerInstance->Config->ConfValue("kmerspam");
-		kmersize = std::clamp(tag->getNum<size_t>("k", 4), static_cast<size_t>(3), static_cast<size_t>(6));
-		minlength = tag->getNum<size_t>("minlength", 12, 6, 80);
-		earlymaxmessages = tag->getNum<size_t>("early_max_messages", 10, 1, 50);
-		earlyratio = tag->getNum<double>("early_ratio", 0.35, 0.0, 1.0);
-		earlyweight = tag->getNum<double>("early_weight", 9.2, 0.0, 30.0);
-		spammythreshold = tag->getNum<double>("spammy_threshold", 0.30, 0.0, 1.0);
-		maxcachesize = tag->getNum<size_t>("max_cache_size", 100000, 1000, 500000);
-		cachettl = tag->getDuration("cache_ttl", 600, 60, 3600);
-		reputationttl = tag->getDuration("reputation_ttl", 900, 60, 7200);
-		tarpitdelay = tag->getDuration("tarpit_delay", 10, 1, 600);
-		tarpitmultiplier = tag->getNum<double>("tarpit_multiplier", 2.0, 1.0, 10.0);
-		tarpitmaxdelay = tag->getDuration("tarpit_max_delay", 0, 0, 86400);
-		glineduration = tag->getDuration("gline_duration", 3600, 60, 86400);
-		exemptmodes = tag->getString("exemptmodes", "CoaA");
-		trustedmodes = tag->getString("trustedmodes", "Vr");
+		ResetLevelSettings();
 
-		std::string actionstr = tag->getString("action", "delay");
-		std::transform(actionstr.begin(), actionstr.end(), actionstr.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-		if (actionstr == "gline")
-			action = SpamAction::GLINE;
-		else if (actionstr == "block")
-			action = SpamAction::BLOCK;
-		else if (actionstr == "silent")
-			action = SpamAction::SILENT;
-		else
-			action = SpamAction::DELAY;
+		unsigned int requestedlevel = std::min(currentlevel, static_cast<unsigned int>(levelsettings.size() - 1));
+		const auto tags = ServerInstance->Config->ConfTags("tarpit");
+		for (auto it = tags.begin(); it != tags.end(); ++it)
+		{
+			const std::shared_ptr<ConfigTag>& tag = it->second;
+			const unsigned int lvl = tag->getNum<unsigned int>("level", std::numeric_limits<unsigned int>::max(), 0, static_cast<unsigned int>(levelsettings.size() - 1));
+			if (lvl >= levelsettings.size())
+				throw ModuleException("<tarpit> tags must include level=\"0-4\"");
+
+			OverrideSettings(levelsettings[lvl], tag);
+			if (tag->getBool("default", false))
+				requestedlevel = lvl;
+		}
+
+		ApplyPreset(requestedlevel, false);
 	}
 
 	ModResult OnUserPreMessage(User* user, MessageTarget& target, MessageDetails& details) override
@@ -182,6 +284,13 @@ public:
 			return MOD_RES_PASSTHRU;
 
 		const time_t now = ServerInstance->Time();
+		++totalinspected;
+
+		if (totalobservations < warmupobservations)
+		{
+			UpdateCache(kmers, now);
+			return MOD_RES_PASSTHRU;
+		}
 
 		const double msgweight = CalculateMessageWeight(kmers);
 		const double spammy_ratio = CalculateSpammyRatio(kmers, now);
@@ -196,36 +305,68 @@ public:
 			&& (ratio < earlyratio) && (weightavg < earlyweight);
 		const bool reputationtrip = (spammy_ratio > spammythreshold);
 
-		bool shoulddelay = (now < stats->tarpit_until) || earlytrip || reputationtrip;
+		User* dest = target.Get<User>();
+		const std::string destnick = dest ? dest->nick : "";
+		const unsigned long fanoutbonus = CalculateFanoutPenalty(*stats, destnick, now);
+		const bool fanouttrip = (fanoutbonus > 0);
+		const unsigned long kmerbonus = CalculateKmerPenalty(kmers, spammy_ratio, now);
+		const bool kmertrip = (kmerbonus > 0);
 
+		bool shoulddelay = (now < stats->tarpit_until) || earlytrip || reputationtrip || fanouttrip || kmertrip;
 		if (!shoulddelay)
 			return MOD_RES_PASSTHRU;
 
 		if (earlytrip)
 			MarkKmersSpammy(kmers, now);
 
-		if (action == SpamAction::DELAY)
+		if (action != SpamAction::DELAY)
 		{
-			const unsigned long delay = QueueMessage(*stats, local, target, details, now);
-			std::string reason;
-			if (earlytrip)
-				reason = "low-entropy";
-			if (reputationtrip)
-			{
-				if (!reason.empty())
-					reason += "+";
-				reason += "spammy-kmer";
-			}
-			if (reason.empty())
-				reason = "repeat-delay";
-
-			ServerInstance->Logs.Normal(MODNAME, "Tarpitting {} -> {} for {}s (reason={} ratio={} weight={} spammy={} text='{}')",
-				user->nick, target.Get<User>()->nick, delay, reason, ratio, weightavg, spammy_ratio, details.text);
-
+			HandleDetection(local, target, normalized);
 			return MOD_RES_DENY;
 		}
 
-		HandleDetection(local, target, normalized);
+		bool dropped = false;
+		const unsigned long delay = QueueMessage(*stats, local, target, details, now, fanoutbonus, kmerbonus, dropped);
+
+		std::string reason;
+		if (earlytrip)
+			reason = "low-entropy";
+		if (reputationtrip)
+		{
+			if (!reason.empty())
+				reason += "+";
+			reason += "spammy-kmer";
+		}
+		if (kmertrip)
+		{
+			if (!reason.empty())
+				reason += "+";
+			reason += "kmer-penalty";
+		}
+		if (fanouttrip)
+		{
+			if (!reason.empty())
+				reason += "+";
+			reason += "fanout";
+		}
+		if (reason.empty())
+			reason = (now < stats->tarpit_until ? "repeat-delay" : "heuristic");
+
+		if (dropped)
+		{
+			++totaldropped;
+			RecordEvent(true, delay, reason);
+			ServerInstance->Logs.Normal(MODNAME, "Dropping {} -> {} (reason={} exceeded tarpit_max={}s ratio={:.3f} weight={:.3f} spammy={:.3f} text='{}')",
+				user->nick, destnick, reason, tarpitmaxdelay, ratio, weightavg, spammy_ratio, details.text);
+			return MOD_RES_DENY;
+		}
+
+		++totaldelayed;
+		totaldelay += delay;
+		RecordEvent(false, delay, reason);
+		ServerInstance->Logs.Normal(MODNAME, "Tarpitting {} -> {} for {}s (reason={} ratio={:.3f} weight={:.3f} spammy={:.3f} text='{}')",
+			user->nick, destnick, delay, reason, ratio, weightavg, spammy_ratio, details.text);
+
 		return MOD_RES_DENY;
 	}
 
@@ -236,17 +377,364 @@ public:
 		ProcessQueues(curtime);
 	}
 
-	void OnUserDisconnect(LocalUser* user) override
+	void OnUserQuit(LocalUser* user, const std::string&, const std::string&) override
 	{
 		auto* stats = userstats.Get(user);
 		if (stats)
-		{
 			stats->queue.clear();
-			stats->early_distinct.clear();
+	}
+
+	void SendStats(User* user, unsigned long window)
+	{
+		if (!IS_OPER(user))
+			return;
+
+		const time_t cutoff = (window ? (ServerInstance->Time() - window) : 0);
+
+		unsigned long windowdelays = 0;
+		unsigned long windowdrops = 0;
+		unsigned long long windowdelaytotal = 0;
+		insp::flat_map<std::string, unsigned long> windowreasons;
+
+		for (auto it = recentevents.rbegin(); it != recentevents.rend(); ++it)
+		{
+			if (cutoff && it->ts < cutoff)
+				break;
+			if (it->dropped)
+				++windowdrops;
+			else
+			{
+				++windowdelays;
+				windowdelaytotal += it->delay;
+			}
+			++windowreasons[it->reason];
+		}
+
+		double avgwindow = (windowdelays ? static_cast<double>(windowdelaytotal) / static_cast<double>(windowdelays) : 0.0);
+		double avgtotal = (totaldelayed ? static_cast<double>(totaldelay) / static_cast<double>(totaldelayed) : 0.0);
+
+		user->WriteNotice(InspIRCd::Format("TARPIT: level=%u (%s) inspected=%llu delayed=%llu dropped=%llu avg_delay=%.2fs", currentlevel,
+			presets[currentlevel].name, totalinspected, totaldelayed, totaldropped, avgtotal));
+
+		if (window)
+		{
+			user->WriteNotice(InspIRCd::Format("TARPIT: last %us delayed=%lu dropped=%lu avg_delay=%.2fs", window, windowdelays, windowdrops, avgwindow));
+			if (!windowreasons.empty())
+			{
+				std::string reasonline = "TARPIT: reasons";
+				for (const auto& [reason, count] : windowreasons)
+				{
+					reasonline.push_back(' ');
+					reasonline += reason + "=" + ConvToStr(count);
+				}
+				user->WriteNotice(reasonline);
+			}
 		}
 	}
 
+	void SendConfig(User* user, const std::string& key)
+	{
+		if (!IS_OPER(user))
+			return;
+
+		if (key.empty())
+		{
+			user->WriteNotice(InspIRCd::Format("TARPIT config: level=%u (%s) delay=%.2fs multiplier=%.2f max_delay=%lus spammy_threshold=%.2f early_ratio=%.2f fanout_delay=%.2f fanout_multiplier=%.2f fanout_window=%lus kmer_penalty=%.2f kmer_cap=%lus",
+				currentlevel, presets[currentlevel].name, tarpitdelay, tarpitmultiplier, tarpitmaxdelay,
+				spammythreshold, earlyratio, fanoutdelay, fanoutmultiplier, fanoutwindow, kmerpenalty, kmerpenaltycap));
+			return;
+		}
+
+		const std::string lower = InspIRCd::ToLower(key);
+		std::string value;
+		if (lower == "level")
+			value = ConvToStr(currentlevel);
+		else if (lower == "delay")
+			value = ConvToStr(tarpitdelay);
+		else if (lower == "multiplier")
+			value = ConvToStr(tarpitmultiplier);
+		else if (lower == "max_delay")
+			value = ConvToStr(tarpitmaxdelay);
+		else if (lower == "spammy_threshold")
+			value = ConvToStr(spammythreshold);
+		else if (lower == "early_ratio")
+			value = ConvToStr(earlyratio);
+		else if (lower == "fanout_delay")
+			value = ConvToStr(fanoutdelay);
+		else if (lower == "fanout_multiplier")
+			value = ConvToStr(fanoutmultiplier);
+		else if (lower == "fanout_window")
+			value = ConvToStr(fanoutwindow);
+		else if (lower == "kmer_penalty")
+			value = ConvToStr(kmerpenalty);
+		else if (lower == "kmer_penalty_cap")
+			value = ConvToStr(kmerpenaltycap);
+		else if (lower == "kmer_penalty_min_ratio")
+			value = ConvToStr(kmerpenaltyminratio);
+		else if (lower == "kmer_penalty_min_score")
+			value = ConvToStr(kmerpenaltyminscore);
+		else
+		{
+			user->WriteNotice("TARPIT: Unknown config key " + key);
+			return;
+		}
+
+		user->WriteNotice("TARPIT: " + lower + " = " + value);
+	}
+
+	bool SetConfig(User* user, const std::string& key, const std::string& value)
+	{
+		if (!IS_OPER(user))
+			return false;
+
+		const std::string lower = InspIRCd::ToLower(key);
+		try
+		{
+			if (lower == "level")
+			{
+				unsigned int lvl = ConvToNum<unsigned int>(value);
+				if (lvl >= std::size(presets))
+					throw ModuleException("invalid level");
+				ApplyPreset(lvl, true);
+				ServerInstance->SNO.WriteGlobalSno('a', "m_tarpit: {} set level {} ({}).", user->nick, lvl, presets[lvl].name);
+				return true;
+			}
+			else if (lower == "delay")
+			{
+				SetNumeric(user, tarpitdelay, value, 1.0, 600.0, "delay");
+				CurrentLevelSettings().tarpitdelay = tarpitdelay;
+			}
+			else if (lower == "multiplier")
+			{
+				SetNumeric(user, tarpitmultiplier, value, 1.0, 10.0, "multiplier");
+				CurrentLevelSettings().tarpitmultiplier = tarpitmultiplier;
+			}
+			else if (lower == "max_delay")
+			{
+				SetNumeric(user, tarpitmaxdelay, value, 0.0, 86400.0, "max delay");
+				CurrentLevelSettings().tarpitmaxdelay = tarpitmaxdelay;
+			}
+			else if (lower == "spammy_threshold")
+			{
+				SetNumeric(user, spammythreshold, value, 0.0, 1.0, "spammy threshold");
+				CurrentLevelSettings().spammythreshold = spammythreshold;
+			}
+			else if (lower == "early_ratio")
+			{
+				SetNumeric(user, earlyratio, value, 0.0, 1.0, "early ratio");
+				CurrentLevelSettings().earlyratio = earlyratio;
+			}
+			else if (lower == "fanout_delay")
+			{
+				SetNumeric(user, fanoutdelay, value, 0.0, 60.0, "fanout delay");
+				CurrentLevelSettings().fanoutdelay = fanoutdelay;
+			}
+			else if (lower == "fanout_multiplier")
+			{
+				SetNumeric(user, fanoutmultiplier, value, 1.0, 10.0, "fanout multiplier");
+				CurrentLevelSettings().fanoutmultiplier = fanoutmultiplier;
+			}
+			else if (lower == "fanout_window")
+			{
+				SetNumeric(user, fanoutwindow, value, 0.0, 600.0, "fanout window");
+				CurrentLevelSettings().fanoutwindow = fanoutwindow;
+			}
+			else if (lower == "kmer_penalty")
+			{
+				SetNumeric(user, kmerpenalty, value, 0.0, 3600.0, "k-mer penalty");
+				CurrentLevelSettings().kmerpenalty = kmerpenalty;
+			}
+			else if (lower == "kmer_penalty_cap")
+			{
+				SetNumeric(user, kmerpenaltycap, value, 0.0, 86400.0, "k-mer cap");
+				CurrentLevelSettings().kmerpenaltycap = kmerpenaltycap;
+			}
+			else if (lower == "kmer_penalty_min_ratio")
+			{
+				SetNumeric(user, kmerpenaltyminratio, value, 0.0, 1.0, "k-mer min ratio");
+				CurrentLevelSettings().kmerpenaltyminratio = kmerpenaltyminratio;
+			}
+			else if (lower == "kmer_penalty_min_score")
+			{
+				SetNumeric(user, kmerpenaltyminscore, value, 0.0, 1000.0, "k-mer min score");
+				CurrentLevelSettings().kmerpenaltyminscore = kmerpenaltyminscore;
+			}
+			else
+			{
+				user->WriteNotice("TARPIT: Unknown key " + key);
+				return false;
+			}
+		}
+		catch (const ConvToNumError&)
+		{
+			user->WriteNotice("TARPIT: Invalid value for " + key);
+			return false;
+		}
+
+		ServerInstance->SNO.WriteGlobalSno('a', "m_tarpit: {} set {} to {}", user->nick, lower, value);
+		return true;
+	}
+
 private:
+	void RecordEvent(bool dropped, unsigned long delay, const std::string& reason)
+	{
+		StatSample sample;
+		sample.ts = ServerInstance->Time();
+		sample.delay = delay;
+		sample.dropped = dropped;
+		sample.reason = reason;
+		recentevents.push_back(sample);
+		++reasoncounts[reason];
+
+		while (!recentevents.empty())
+		{
+			const time_t cutoff = ServerInstance->Time() - 900;
+			if (recentevents.front().ts >= cutoff && recentevents.size() <= 200)
+				break;
+			recentevents.pop_front();
+		}
+	}
+
+	void ApplyPreset(unsigned int level, bool announce)
+	{
+		if (level >= std::size(presets))
+			level = static_cast<unsigned int>(std::size(presets) - 1);
+
+		const Preset& preset = presets[level];
+		const LevelSettings& settings = levelsettings[level];
+		action = settings.action;
+		kmersize = settings.kmersize;
+		minlength = settings.minlength;
+		earlymaxmessages = settings.earlymaxmessages;
+		earlyratio = settings.earlyratio;
+		earlyweight = settings.earlyweight;
+		spammythreshold = settings.spammythreshold;
+		maxcachesize = settings.maxcachesize;
+		cachettl = settings.cachettl;
+		reputationttl = settings.reputationttl;
+		warmupobservations = settings.warmupobservations;
+		tarpitdelay = settings.tarpitdelay;
+		tarpitmultiplier = settings.tarpitmultiplier;
+		tarpitmaxdelay = settings.tarpitmaxdelay;
+		fanoutdelay = settings.fanoutdelay;
+		fanoutmultiplier = settings.fanoutmultiplier;
+		fanoutwindow = settings.fanoutwindow;
+		kmerpenalty = settings.kmerpenalty;
+		kmerpenaltycap = settings.kmerpenaltycap;
+		kmerpenaltyminratio = settings.kmerpenaltyminratio;
+		kmerpenaltyminscore = settings.kmerpenaltyminscore;
+		glineduration = settings.glineduration;
+		exemptmodes = settings.exemptmodes;
+		trustedmodes = settings.trustedmodes;
+		currentlevel = level;
+
+		if (announce)
+			ServerInstance->SNO.WriteGlobalSno('a', "m_tarpit: applied preset {} ({}).", level, preset.name);
+	}
+
+	void ResetLevelSettings()
+	{
+		for (unsigned int i = 0; i < levelsettings.size(); ++i)
+			levelsettings[i] = BuildDefaultSettings(i);
+	}
+
+	LevelSettings BuildDefaultSettings(unsigned int level) const
+	{
+		LevelSettings settings;
+		const Preset& preset = presets[level];
+		settings.tarpitdelay = preset.delay;
+		settings.tarpitmultiplier = preset.multiplier;
+		settings.tarpitmaxdelay = preset.maxdelay;
+		settings.spammythreshold = preset.spammy_threshold;
+		settings.earlyratio = preset.early_ratio;
+		settings.earlyweight = preset.early_weight;
+		settings.fanoutwindow = preset.fanout_window;
+		settings.fanoutdelay = preset.fanout_delay;
+		settings.fanoutmultiplier = preset.fanout_multiplier;
+		settings.kmerpenalty = preset.kmer_penalty;
+		settings.kmerpenaltycap = preset.kmer_penalty_cap;
+		settings.kmerpenaltyminratio = preset.kmer_penalty_min_ratio;
+		settings.kmerpenaltyminscore = preset.kmer_penalty_min_score;
+		settings.reputationttl = preset.reputation_ttl;
+		return settings;
+	}
+
+	static std::string ActionToString(SpamAction action)
+	{
+		switch (action)
+		{
+			case SpamAction::BLOCK:
+				return "block";
+			case SpamAction::GLINE:
+				return "gline";
+			case SpamAction::SILENT:
+				return "silent";
+			case SpamAction::DELAY:
+			default:
+				return "delay";
+		}
+	}
+
+	static SpamAction ParseAction(const std::string& name)
+	{
+		std::string lower = name;
+		std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		if (lower == "gline")
+			return SpamAction::GLINE;
+		if (lower == "block")
+			return SpamAction::BLOCK;
+		if (lower == "silent")
+			return SpamAction::SILENT;
+		return SpamAction::DELAY;
+	}
+
+	void OverrideSettings(LevelSettings& settings, const std::shared_ptr<ConfigTag>& tag)
+	{
+		settings.kmersize = std::clamp(tag->getNum<size_t>("k", settings.kmersize), static_cast<size_t>(3), static_cast<size_t>(6));
+		settings.minlength = tag->getNum<size_t>("minlength", settings.minlength, 6, 200);
+		settings.earlymaxmessages = tag->getNum<size_t>("early_max_messages", settings.earlymaxmessages, 1, 50);
+		settings.earlyratio = tag->getNum<double>("early_ratio", settings.earlyratio, 0.0, 1.0);
+		settings.earlyweight = tag->getNum<double>("early_weight", settings.earlyweight, 0.0, 30.0);
+		settings.spammythreshold = tag->getNum<double>("spammy_threshold", settings.spammythreshold, 0.0, 1.0);
+		settings.maxcachesize = tag->getNum<size_t>("max_cache_size", settings.maxcachesize, 1000, 500000);
+		settings.cachettl = tag->getDuration("cache_ttl", settings.cachettl, 60, 7200);
+		settings.reputationttl = tag->getDuration("reputation_ttl", settings.reputationttl, 60, 7200);
+		settings.warmupobservations = tag->getNum<size_t>("warmup_observations", settings.warmupobservations, 0, 1000000);
+		settings.tarpitdelay = tag->getNum<double>("tarpit_delay", settings.tarpitdelay, 1.0, 600.0);
+		settings.tarpitmultiplier = tag->getNum<double>("tarpit_multiplier", settings.tarpitmultiplier, 1.0, 10.0);
+		settings.tarpitmaxdelay = tag->getDuration("tarpit_max_delay", settings.tarpitmaxdelay, 0, 86400);
+		settings.fanoutdelay = tag->getNum<double>("fanout_delay", settings.fanoutdelay, 0.0, 60.0);
+		settings.fanoutmultiplier = tag->getNum<double>("fanout_multiplier", settings.fanoutmultiplier, 1.0, 10.0);
+		settings.fanoutwindow = tag->getDuration("fanout_window", settings.fanoutwindow, 0, 600);
+		settings.kmerpenalty = tag->getNum<double>("kmer_penalty", settings.kmerpenalty, 0.0, 3600.0);
+		settings.kmerpenaltycap = tag->getDuration("kmer_penalty_cap", settings.kmerpenaltycap, 0, 86400);
+		settings.kmerpenaltyminratio = tag->getNum<double>("kmer_penalty_min_ratio", settings.kmerpenaltyminratio, 0.0, 1.0);
+		settings.kmerpenaltyminscore = tag->getNum<double>("kmer_penalty_min_score", settings.kmerpenaltyminscore, 0.0, 1000.0);
+		settings.glineduration = tag->getDuration("gline_duration", settings.glineduration, 60, 86400);
+		settings.exemptmodes = tag->getString("exemptmodes", settings.exemptmodes);
+		settings.trustedmodes = tag->getString("trustedmodes", settings.trustedmodes);
+
+		const std::string actionstr = tag->getString("action", ActionToString(settings.action));
+		settings.action = ParseAction(actionstr);
+	}
+
+	LevelSettings& CurrentLevelSettings()
+	{
+		if (currentlevel >= levelsettings.size())
+			currentlevel = static_cast<unsigned int>(levelsettings.size() - 1);
+		return levelsettings[currentlevel];
+	}
+
+	template <typename T>
+	void SetNumeric(User* user, T& field, const std::string& value, double min, double max, const std::string& name)
+	{
+		T converted = ConvToNum<T>(value);
+		const double dbl = static_cast<double>(converted);
+		if (dbl < min || dbl > max)
+			throw ModuleException("out of range");
+		field = converted;
+	}
+
 	UserStats* GetStats(LocalUser* user)
 	{
 		auto* stats = userstats.Get(user);
@@ -319,6 +807,75 @@ private:
 		return static_cast<double>(hits) / static_cast<double>(kmers.size());
 	}
 
+	unsigned long CalculateFanoutPenalty(UserStats& stats, const std::string& target, time_t now)
+	{
+		if ((fanoutdelay <= 0.0) || !fanoutwindow)
+			return 0;
+
+		while (!stats.fanout_recent.empty() && (now - stats.fanout_recent.front().time) > static_cast<time_t>(fanoutwindow))
+		{
+			const FanoutHit& expired = stats.fanout_recent.front();
+			auto it = stats.fanout_counts.find(expired.target);
+			if (it != stats.fanout_counts.end())
+			{
+				if (it->second <= 1)
+					stats.fanout_counts.erase(it);
+				else
+					it->second--;
+			}
+			stats.fanout_recent.pop_front();
+		}
+
+		stats.fanout_recent.push_back({target, now});
+		stats.fanout_counts[target]++;
+
+		const size_t unique = stats.fanout_counts.size();
+		if (unique <= 1)
+			return 0;
+
+		double penalty = fanoutdelay;
+		if (fanoutmultiplier > 1.0 && unique > 1)
+			penalty *= std::pow(fanoutmultiplier, static_cast<double>(unique - 1));
+
+		if (penalty <= 0.0)
+			return 0;
+
+		if (penalty > static_cast<double>(std::numeric_limits<unsigned long>::max()))
+			return std::numeric_limits<unsigned long>::max();
+		return static_cast<unsigned long>(std::ceil(penalty));
+	}
+
+	unsigned long CalculateKmerPenalty(const std::vector<std::string>& kmers, double spammy_ratio, time_t now)
+	{
+		if ((kmerpenalty <= 0.0) || (spammy_ratio < kmerpenaltyminratio))
+			return 0;
+
+		insp::flat_set<std::string> distinct(kmers.begin(), kmers.end());
+		double scoretotal = 0.0;
+		for (const auto& kmer : distinct)
+		{
+			auto it = reputation.find(kmer);
+			if (it == reputation.end())
+				continue;
+			if ((now - it->second.last_seen) > static_cast<time_t>(reputationttl))
+				continue;
+			if (it->second.score < kmerpenaltyminscore)
+				continue;
+			scoretotal += it->second.score;
+		}
+
+		if (scoretotal <= 0.0)
+			return 0;
+
+		double penalty = scoretotal * kmerpenalty;
+		if (kmerpenaltycap && penalty > static_cast<double>(kmerpenaltycap))
+			penalty = kmerpenaltycap;
+
+		if (penalty > static_cast<double>(std::numeric_limits<unsigned long>::max()))
+			return std::numeric_limits<unsigned long>::max();
+		return static_cast<unsigned long>(std::ceil(penalty));
+	}
+
 	void MarkKmersSpammy(const std::vector<std::string>& kmers, time_t now)
 	{
 		for (const auto& kmer : kmers)
@@ -329,8 +886,11 @@ private:
 		}
 	}
 
-	unsigned long QueueMessage(UserStats& stats, LocalUser* user, MessageTarget& target, MessageDetails& details, time_t now) const
+	unsigned long QueueMessage(UserStats& stats, LocalUser* user, MessageTarget& target, MessageDetails& details, time_t now,
+		unsigned long fanoutbonus, unsigned long kmerbonus, bool& dropped)
 	{
+		dropped = false;
+
 		User* dest = target.Get<User>();
 		if (!dest)
 			return 0;
@@ -339,31 +899,51 @@ private:
 		pending.command = (details.type == MessageType::NOTICE ? "NOTICE" : "PRIVMSG");
 		pending.target = dest->nick;
 		pending.message = details.text;
-		unsigned long delay = tarpitdelay;
+
+		double delay = tarpitdelay;
+		if (now < stats.tarpit_until && stats.last_delay)
+			delay = stats.last_delay;
+
 		if (now < stats.tarpit_until)
+			delay = std::ceil(delay * tarpitmultiplier);
+
+		if (fanoutbonus)
 		{
 			const double scaled = std::ceil(static_cast<double>(delay) * tarpitmultiplier);
 			if (scaled > static_cast<double>(std::numeric_limits<unsigned long>::max()))
 				delay = std::numeric_limits<unsigned long>::max();
 			else
-				delay = static_cast<unsigned long>(scaled);
+				delay += fanoutbonus;
 		}
 
-		if (tarpitmaxdelay && delay > tarpitmaxdelay)
-			delay = tarpitmaxdelay;
+		if (kmerbonus)
+		{
+			if (delay > std::numeric_limits<double>::max() - kmerbonus)
+				delay = std::numeric_limits<double>::max();
+			else
+				delay += kmerbonus;
+		}
+
+		if (tarpitmaxdelay && delay >= static_cast<double>(tarpitmaxdelay))
+		{
+			dropped = true;
+			stats.last_delay = tarpitmaxdelay;
+			return tarpitmaxdelay;
+		}
 
 		if (delay < tarpitdelay)
 			delay = tarpitdelay;
 
-		pending.release = std::max(now, stats.tarpit_until) + delay;
+		unsigned long finaldelay = static_cast<unsigned long>(std::ceil(delay));
+		pending.release = std::max(now, stats.tarpit_until) + finaldelay;
 		stats.tarpit_until = pending.release;
+		stats.last_delay = finaldelay;
 		stats.queue.push_back(pending);
 
-		user->WriteNotice("Your message has been delayed by the spam filter.");
-		ServerInstance->Logs.Debug(MODNAME, "Delaying message from {} to {} until {}",
-			user->nick, pending.target, pending.release);
+		if (IS_LOCAL(user))
+			user->WriteNotice("Your message has been delayed by the spam filter.");
 
-		return delay;
+		return finaldelay;
 	}
 
 	void ProcessQueues(time_t now)
@@ -376,14 +956,6 @@ private:
 			if (!stats)
 				continue;
 
-			// If user is quitting, clear queue immediately to free memory
-			if (user->quitting)
-			{
-				stats->queue.clear();
-				continue;
-			}
-
-			bool released = false;
 			while (!stats->queue.empty() && stats->queue.front().release <= now)
 			{
 				TarpitMessage msg = stats->queue.front();
@@ -397,10 +969,9 @@ private:
 				if (ServerInstance->Parser.CallHandler(msg.command, params, user) != CmdResult::SUCCESS)
 					user->WriteNotice("A delayed message could not be delivered.");
 				stats->bypass = false;
-				released = true;
 			}
 
-			if (released && stats->queue.empty() && now >= stats->tarpit_until)
+			if (stats->queue.empty() && now >= stats->tarpit_until)
 				stats->tarpit_until = now;
 		}
 	}
@@ -424,7 +995,6 @@ private:
 			case SpamAction::SILENT:
 				break;
 			case SpamAction::DELAY:
-				// This path should not be reached; handled earlier.
 				break;
 		}
 	}
@@ -590,6 +1160,85 @@ private:
 	{
 		return (cp >= 'a' && cp <= 'z') || (cp >= '0' && cp <= '9') || cp == '.' || cp == '-' || cp == '_';
 	}
+
+public:
+	// Interface for CommandTarpit
+	friend class CommandTarpit;
 };
+
+CommandTarpit::CommandTarpit(ModuleKmerSpam& mod)
+	: Command(&mod, "TARPIT", 1)
+	, parent(mod)
+{
+	access_needed = CmdAccess::OPERATOR;
+	syntax = { "STATS [seconds]", "CONFIG GET [key]", "CONFIG SET <key> <value>" };
+}
+
+CmdResult CommandTarpit::Handle(User* user, const Params& params)
+{
+	if (!IS_OPER(user))
+		return CmdResult::FAILURE;
+
+	if (params.empty())
+	{
+		user->WriteNotice("TARPIT: STATS [seconds] | CONFIG GET [key] | CONFIG SET <key> <value>");
+		return CmdResult::FAILURE;
+	}
+
+	const std::string sub = InspIRCd::ToLower(params[0]);
+	if (sub == "stats")
+	{
+		unsigned long window = 300;
+		if (params.size() > 1)
+		{
+			try
+			{
+				window = ConvToNum<unsigned long>(params[1]);
+			}
+			catch (const ConvToNumError&)
+			{
+				user->WriteNotice("TARPIT: invalid window");
+				return CmdResult::FAILURE;
+			}
+		}
+		parent.SendStats(user, window);
+		return CmdResult::SUCCESS;
+	}
+
+	if (sub == "config")
+	{
+		if (params.size() < 2)
+		{
+			user->WriteNotice("TARPIT: CONFIG GET [key] | CONFIG SET <key> <value>");
+			return CmdResult::FAILURE;
+		}
+
+		const std::string action = InspIRCd::ToLower(params[1]);
+		if (action == "get")
+		{
+			const std::string key = (params.size() > 2 ? params[2] : "");
+			parent.SendConfig(user, key);
+			return CmdResult::SUCCESS;
+		}
+		else if (action == "set")
+		{
+			if (params.size() < 4)
+			{
+				user->WriteNotice("TARPIT: CONFIG SET <key> <value>");
+				return CmdResult::FAILURE;
+			}
+
+			if (parent.SetConfig(user, params[2], params[3]))
+				return CmdResult::SUCCESS;
+			return CmdResult::FAILURE;
+		}
+
+		user->WriteNotice("TARPIT: unknown CONFIG action");
+		return CmdResult::FAILURE;
+	}
+
+	user->WriteNotice("TARPIT: unknown subcommand");
+	return CmdResult::FAILURE;
+}
 
 MODULE_INIT(ModuleKmerSpam)
