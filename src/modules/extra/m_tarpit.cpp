@@ -22,7 +22,9 @@
 #include "xline.h"
 #include "extension.h"
 #include <array>
+#include <cerrno>
 #include <cmath>
+#include <cstdlib>
 #include <deque>
 #include <limits>
 
@@ -495,7 +497,10 @@ public:
 		{
 			if (lower == "level")
 			{
-				unsigned int lvl = ConvToNum<unsigned int>(value);
+				unsigned long parsed = 0;
+				if (!ParseUnsigned(value, parsed))
+					throw ModuleException(this, "invalid level");
+				unsigned int lvl = static_cast<unsigned int>(parsed);
 				if (lvl >= std::size(presets))
 					throw ModuleException(this, "invalid level");
 				ApplyPreset(lvl, true);
@@ -568,7 +573,7 @@ public:
 				return false;
 			}
 		}
-		catch (const ConvToNumError&)
+		catch (const ModuleException&)
 		{
 			user->WriteNotice("TARPIT: Invalid value for " + key);
 			return false;
@@ -728,13 +733,26 @@ private:
 		return levelsettings[currentlevel];
 	}
 
+	bool ParseUnsigned(const std::string& text, unsigned long& out) const
+	{
+		if (text.empty())
+			return false;
+		char* end = nullptr;
+		errno = 0;
+		unsigned long val = std::strtoul(text.c_str(), &end, 10);
+		if ((end == nullptr) || (*end != '\0') || errno == ERANGE)
+			return false;
+		out = val;
+		return true;
+	}
+
 	template <typename T>
 	void SetNumeric(User* user, T& field, const std::string& value, double min, double max, const std::string& name)
 	{
 		T converted = ConvToNum<T>(value);
 		const double dbl = static_cast<double>(converted);
 		if (dbl < min || dbl > max)
-			throw ModuleException("out of range");
+			throw ModuleException(this, INSP_FORMAT("{} out of range", name));
 		field = converted;
 	}
 
@@ -1195,11 +1213,7 @@ CmdResult CommandTarpit::Handle(User* user, const Params& params)
 		unsigned long window = 300;
 		if (params.size() > 1)
 		{
-			try
-			{
-				window = ConvToNum<unsigned long>(params[1]);
-			}
-			catch (const ConvToNumError&)
+			if (!parent.ParseUnsigned(params[1], window))
 			{
 				user->WriteNotice("TARPIT: invalid window");
 				return CmdResult::FAILURE;
