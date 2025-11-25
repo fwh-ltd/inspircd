@@ -387,7 +387,7 @@ public:
 
 	void SendStats(User* user, unsigned long window)
 	{
-		if (!IS_OPER(user))
+		if (!user->IsOper())
 			return;
 
 		const time_t cutoff = (window ? (ServerInstance->Time() - window) : 0);
@@ -435,7 +435,7 @@ public:
 
 	void SendConfig(User* user, const std::string& key)
 	{
-		if (!IS_OPER(user))
+		if (!user->IsOper())
 			return;
 
 		if (key.empty())
@@ -485,7 +485,7 @@ public:
 
 	bool SetConfig(User* user, const std::string& key, const std::string& value)
 	{
-		if (!IS_OPER(user))
+		if (!user->IsOper())
 			return false;
 
 		const std::string lower = InspIRCd::ToLower(key);
@@ -1177,7 +1177,7 @@ CommandTarpit::CommandTarpit(ModuleTarpit& mod)
 
 CmdResult CommandTarpit::Handle(User* user, const Params& params)
 {
-	if (!IS_OPER(user))
+	if (!user->IsOper())
 		return CmdResult::FAILURE;
 
 	if (params.empty())
