@@ -428,11 +428,11 @@ public:
 		};
 
 		user->WriteNotice(INSP_FORMAT("TARPIT: level={} ({}) {}", currentlevel, presets[currentlevel].name,
-			formatline("total", totalinspected, totaldelayed, totaldropped, totaldelay)));
+			formatline("total", totalinspected, totaldelayed, totaldropped, totaldelay).c_str()));
 
 		if (window)
 		{
-			user->WriteNotice(INSP_FORMAT("TARPIT: {}", formatline(INSP_FORMAT("last {}s", window), windowinspected, windowdelays, windowdrops, windowdelaytotal)));
+			user->WriteNotice(INSP_FORMAT("TARPIT: {}", formatline(INSP_FORMAT("last {}s", window).c_str(), windowinspected, windowdelays, windowdrops, windowdelaytotal)));
 			if (!windowreasons.empty())
 			{
 				const unsigned long totalwindowevents = windowdelays + windowdrops;
