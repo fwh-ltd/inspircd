@@ -247,7 +247,7 @@ public:
 			const std::shared_ptr<ConfigTag>& tag = it->second;
 			const unsigned int lvl = tag->getNum<unsigned int>("level", std::numeric_limits<unsigned int>::max(), 0, static_cast<unsigned int>(levelsettings.size() - 1));
 			if (lvl >= levelsettings.size())
-				throw ModuleException("<tarpit> tags must include level=\"0-4\"");
+				throw ModuleException(this, "<tarpit> tags must include level=\"0-4\"");
 
 			OverrideSettings(levelsettings[lvl], tag);
 			if (tag->getBool("default", false))
