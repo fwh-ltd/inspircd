@@ -446,7 +446,8 @@ public:
 			return;
 		}
 
-		const std::string lower = InspIRCd::ToLower(key);
+		std::string lower = key;
+		std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 		std::string value;
 		if (lower == "level")
 			value = ConvToStr(currentlevel);
@@ -488,7 +489,8 @@ public:
 		if (!user->IsOper())
 			return false;
 
-		const std::string lower = InspIRCd::ToLower(key);
+		std::string lower = key;
+		std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 		try
 		{
 			if (lower == "level")
@@ -1186,7 +1188,8 @@ CmdResult CommandTarpit::Handle(User* user, const Params& params)
 		return CmdResult::FAILURE;
 	}
 
-	const std::string sub = InspIRCd::ToLower(params[0]);
+	std::string sub = params[0];
+	std::transform(sub.begin(), sub.end(), sub.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 	if (sub == "stats")
 	{
 		unsigned long window = 300;
@@ -1214,7 +1217,8 @@ CmdResult CommandTarpit::Handle(User* user, const Params& params)
 			return CmdResult::FAILURE;
 		}
 
-		const std::string action = InspIRCd::ToLower(params[1]);
+		std::string action = params[1];
+		std::transform(action.begin(), action.end(), action.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 		if (action == "get")
 		{
 			const std::string key = (params.size() > 2 ? params[2] : "");
