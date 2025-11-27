@@ -519,6 +519,8 @@ public:
 		std::string value;
 		if (lower == "level")
 			value = ConvToStr(currentlevel);
+		else if (lower == "k")
+			value = ConvToStr(kmersize);
 		else if (lower == "delay")
 			value = ConvToStr(tarpitdelay);
 		else if (lower == "multiplier")
@@ -587,6 +589,11 @@ public:
 				ServerInstance->SNO.WriteGlobalSno('a', "m_tarpit: {} set level {} ({}).", user->nick, lvl, presets[lvl].name);
 				user->WriteNotice(INSP_FORMAT("TARPIT: {} set to {}", lower, lvl));
 				return true;
+			}
+			else if (lower == "k")
+			{
+				SetNumeric(user, kmersize, value, 3.0, 6.0, "k");
+				CurrentLevelSettings().kmersize = kmersize;
 			}
 			else if (lower == "delay")
 			{
