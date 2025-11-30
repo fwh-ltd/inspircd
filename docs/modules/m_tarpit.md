@@ -63,6 +63,7 @@ The interaction weights multiply the base delay when multiple heuristics fire (e
 | `cache_ttl`          | `600`   | Trim k-mers that have not been seen in this window (seconds).              |
 | `reputation_ttl`     | preset  | How long spammy k-mers retain their reputation (seconds).                  |
 | `warmup_observations`| `5000`  | Skip penalising until the module has inspected this many messages (prevents cold-start false positives). |
+| `feedback_positive` / `feedback_negative` | `10` / `10` | Reputation delta applied per k-mer when `/TARPIT LEARN pos/neg` is used. Higher values weight the sample more heavily; set to zero to disable operator training. |
 | `stats_window` / `stats_max_events` | `900` / `1000` | Size of the rolling stats history in seconds and the maximum number of delayed/dropped events to retain for `/TARPIT STATS`. |
 | `exemptmodes`        | `CoaA`  | Users with any of these modes bypass the filter entirely.                  |
 | `trustedmodes`       | `Vr`    | Users with these modes skip inspection (opers, service bots, etc.).        |
@@ -96,6 +97,7 @@ The interaction weights multiply the base delay when multiple heuristics fire (e
   * `STATS [seconds]` — dump global totals plus a rolling window (default 300s) grouped by reason. Percentages are calculated relative to the number of processed messages; tune `stats_window`/`stats_max_events` if you want deeper history.
   * `CONFIG GET [key]` — display the current preset and/or an individual knob (e.g., `kmer_penalty`).
   * `CONFIG SET level <0-4>` — snap to a preset. Any other key/value pair overrides the live state until rehash.
+  * `LEARN <pos|neg> <text>` — feed a labeled sample. `pos` boosts the shared spam reputation for the k-mers in the provided text and seeds the cache; `neg` sharply lowers their reputation to counter false positives. Normalization is identical to live messages (case-folded ASCII, zero-width stripped).
   Changes are announced to the global `a` snomask for auditability.
 * A canned configuration lives in `docs/conf/tarpit.example.conf`. Copy it, tweak the defaults, and include it from `inspircd.conf`.
 

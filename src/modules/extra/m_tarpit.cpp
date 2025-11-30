@@ -189,6 +189,8 @@ private:
 		double interactionexponent = 1.0;
 		unsigned long trustdecay = 0;
 		double trustweight = 0.0;
+		double feedbackpositive = 10.0;
+		double feedbacknegative = 10.0;
 	};
 
 	struct StatSample final
@@ -256,6 +258,9 @@ private:
 	double interactionexponent = 1.0;
 	unsigned long trustdecay = 0;
 	double trustweight = 0.0;
+	double feedbackpositive = 10.0;
+	double feedbacknegative = 10.0;
+	const double feedbackmaxscore = 100.0;
 
 public:
 	ModuleTarpit()
@@ -559,6 +564,10 @@ public:
 			value = ConvToStr(statseventwindow);
 		else if (lower == "stats_max_events")
 			value = ConvToStr(statseventmax);
+		else if (lower == "feedback_positive")
+			value = ConvToStr(feedbackpositive);
+		else if (lower == "feedback_negative")
+			value = ConvToStr(feedbacknegative);
 		else
 		{
 			user->WriteNotice("TARPIT: Unknown config key " + key);
@@ -697,6 +706,16 @@ public:
 					throw ModuleException(this, "invalid stats max events");
 				statseventmax = static_cast<size_t>(parsed);
 			}
+			else if (lower == "feedback_positive")
+			{
+				SetNumeric(user, feedbackpositive, value, 0.0, 100.0, "feedback positive");
+				CurrentLevelSettings().feedbackpositive = feedbackpositive;
+			}
+			else if (lower == "feedback_negative")
+			{
+				SetNumeric(user, feedbacknegative, value, 0.0, 100.0, "feedback negative");
+				CurrentLevelSettings().feedbacknegative = feedbacknegative;
+			}
 			else
 			{
 				user->WriteNotice("TARPIT: Unknown key " + key);
@@ -772,6 +791,8 @@ private:
 		interactionexponent = settings.interactionexponent;
 		trustdecay = settings.trustdecay;
 		trustweight = settings.trustweight;
+		feedbackpositive = settings.feedbackpositive;
+		feedbacknegative = settings.feedbacknegative;
 		currentlevel = level;
 
 		if (announce)
@@ -809,6 +830,8 @@ private:
 		settings.interactionexponent = preset.interaction_exponent;
 		settings.trustdecay = preset.trust_decay;
 		settings.trustweight = preset.trust_weight;
+		settings.feedbackpositive = feedbackpositive;
+		settings.feedbacknegative = feedbacknegative;
 		return settings;
 	}
 
@@ -873,6 +896,8 @@ private:
 		settings.interactionexponent = tag->getNum<double>("interaction_exponent", settings.interactionexponent, 0.5, 5.0);
 		settings.trustdecay = tag->getDuration("trust_decay", settings.trustdecay, 0, 7200);
 		settings.trustweight = tag->getNum<double>("trust_weight", settings.trustweight, 0.0, 5.0);
+		settings.feedbackpositive = tag->getNum<double>("feedback_positive", settings.feedbackpositive, 0.0, 100.0);
+		settings.feedbacknegative = tag->getNum<double>("feedback_negative", settings.feedbacknegative, 0.0, 100.0);
 
 		const std::string actionstr = tag->getString("action", ActionToString(settings.action));
 		settings.action = ParseAction(actionstr);
@@ -1376,6 +1401,41 @@ private:
 		return (cp >= 'a' && cp <= 'z') || (cp >= '0' && cp <= '9') || cp == '.' || cp == '-' || cp == '_';
 	}
 
+	bool LearnSample(User* user, bool positive, const std::string& text)
+	{
+		const std::string normalized = NormalizeText(text);
+		if (normalized.length() < kmersize)
+		{
+			user->WriteNotice("TARPIT: sample too short after normalization");
+			return false;
+		}
+
+		const std::vector<std::string> kmers = ExtractKmers(normalized);
+		if (kmers.empty())
+		{
+			user->WriteNotice("TARPIT: sample produced no k-mers");
+			return false;
+		}
+
+		const time_t now = ServerInstance->Time();
+		const double delta = (positive ? feedbackpositive : -feedbacknegative);
+		for (const auto& kmer : kmers)
+		{
+			ReputationEntry& entry = reputation[kmer];
+			entry.score = std::clamp(entry.score + delta, -feedbackmaxscore, feedbackmaxscore);
+			entry.last_seen = now;
+		}
+
+		if (positive)
+			UpdateCache(kmers, now);
+
+		const std::string label = (positive ? "positive" : "negative");
+		ServerInstance->SNO.WriteGlobalSno('a', "m_tarpit: {} submitted {} sample ({} k-mers, delta={:.2f}).",
+			user->nick, label, kmers.size(), std::abs(delta));
+		user->WriteNotice(INSP_FORMAT("TARPIT: recorded {} sample ({} k-mers).", label, kmers.size()));
+		return true;
+	}
+
 public:
 	// Interface for CommandTarpit
 	friend class CommandTarpit;
@@ -1386,7 +1446,7 @@ CommandTarpit::CommandTarpit(ModuleTarpit& mod)
 	, parent(mod)
 {
 	access_needed = CmdAccess::OPERATOR;
-	syntax = { "HELP", "STATS [seconds]", "CONFIG GET [key]", "CONFIG SET <key> <value>" };
+	syntax = { "HELP", "STATS [seconds]", "CONFIG GET [key]", "CONFIG SET <key> <value>", "LEARN <pos|neg> <text>" };
 }
 
 CmdResult CommandTarpit::Handle(User* user, const Params& params)
@@ -1420,6 +1480,38 @@ CmdResult CommandTarpit::Handle(User* user, const Params& params)
 		}
 		parent.SendStats(user, window);
 		return CmdResult::SUCCESS;
+	}
+	else if (sub == "learn")
+	{
+		if (params.size() < 3)
+		{
+			user->WriteNotice("TARPIT: LEARN <pos|neg> <text>");
+			return CmdResult::FAILURE;
+		}
+
+		std::string label = params[1];
+		std::transform(label.begin(), label.end(), label.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		bool positive = false;
+		if (label == "pos" || label == "positive" || label == "spam")
+			positive = true;
+		else if (label == "neg" || label == "negative" || label == "ham")
+			positive = false;
+		else
+		{
+			user->WriteNotice("TARPIT: LEARN <pos|neg> <text>");
+			return CmdResult::FAILURE;
+		}
+
+		std::string sample = params[2];
+		for (size_t idx = 3; idx < params.size(); ++idx)
+		{
+			sample.push_back(' ');
+			sample.append(params[idx]);
+		}
+
+		if (parent.LearnSample(user, positive, sample))
+			return CmdResult::SUCCESS;
+		return CmdResult::FAILURE;
 	}
 
 	if (sub == "config")
@@ -1461,8 +1553,8 @@ CmdResult CommandTarpit::Handle(User* user, const Params& params)
 
 void CommandTarpit::SendHelp(User* user)
 {
-	user->WriteNotice("TARPIT: HELP | STATS [seconds] | CONFIG GET [key] | CONFIG SET <key> <value>");
-	user->WriteNotice("HELP: /TARPIT stats [seconds] shows recent hit rate; \x02config\x02 adjusts runtime knobs.");
+	user->WriteNotice("TARPIT: HELP | STATS [seconds] | CONFIG GET [key] | CONFIG SET <key> <value> | LEARN <pos|neg> <text>");
+	user->WriteNotice("HELP: /TARPIT stats [seconds] shows recent hit rate; \x02config\x02 adjusts runtime knobs; \x02learn\x02 feeds labeled samples.");
 }
 
 MODULE_INIT(ModuleTarpit)
