@@ -137,6 +137,39 @@ You can treat that module as a blueprint for deeper integrations (e.g., storing 
 - Rate-limit hits and deferrals produce Standard Replies (`FAIL ... RATE_LIMITED`, `RPL_METADATASYNCLATER`) that can be inspected with `/QUOTE`.
 - Services modules can hook `event/ircv3-metadata` to log or veto sensitive keys.
 
+## Anope integration notes
+
+We are extending the downstream Anope deployment (`../anope-2.0`, branch `feat/insp4-ircv3-metadata`) so it can mirror BuddyBoss / WordPress profile fields into IRCv3 metadata. The design mirrors the SQL authentication connector: define per-field mappings that run SQL when metadata changes.
+
+```
+field {
+    name = "bb/cn"  # channel name (BuddyBoss profile field id 5)
+    set_query = "INSERT INTO wp_bp_xprofile_data (user_id, field_id, value, last_updated)
+                 VALUES (@user_id@, 5, @value@, NOW())
+                 ON DUPLICATE KEY UPDATE value=@value@, last_updated=NOW()"
+    get_query = "SELECT value FROM wp_bp_xprofile_data WHERE user_id=@user_id@ AND field_id=5"
+    result_column = "value"
+    sync_on_login = true
+    local_only = false
+}
+```
+
+Implementation details to keep in mind when we resume work:
+
+- `@user_id@` expands to the BuddyBoss/WordPress user id returned by the existing SQL auth connector; the lookup happens when the IRC account identifies.
+- `@value@`, `@account@`, and `@nick@` substitutions mirror what SQLAuth already exposes (so field modules can reuse the escaping utilities there).
+- Multi-statement queries are avoided; instead, use `INSERT ... ON DUPLICATE KEY UPDATE` style upserts as shown above.
+- When no row exists, the connector runs the `INSERT` branch; updates reuse the same query, so BuddyBoss xprofile data stays in sync without additional logic.
+- `sync_on_login = true` triggers a `METADATA SET <nick> bb/...` burst right after NickServ identifies, ensuring clients learn about BuddyBoss-side edits even if no metadata change originated from IRC.
+- `local_only` should stay `false` so writes reach the external database rather than InspIRCd’s in-memory store.
+
+Outstanding TODOs for this project:
+
+1. Finalise the substitution list and document it in Anope’s README (covering `@user_id@`, `@value@`, `@account@`, etc.).
+2. Decide whether field definitions can request bi-directional sync (populate metadata from BuddyBoss on connect) and how to rate-limit it.
+3. Wire the new Anope module so it listens for InspIRCd `METADATA` events (via `m_ircv3_metadata`) and calls the SQL helpers above.
+4. Provide a sample services.conf snippet mirroring the `field { ... }` block for `bb/cn`, `bb/sg`, and `bb/tg`.
+
 ## Example workflow
 
 ```

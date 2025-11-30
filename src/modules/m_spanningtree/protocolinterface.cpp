@@ -1,7 +1,8 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2019, 2021-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2021 Herman <GermanAizek@yandex.ru>
+ *   Copyright (C) 2018-2019 Sadie Powell <sadie@witchery.services>
  *   Copyright (C) 2012-2014 Attila Molnar <attilamolnar@hush.com>
  *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
@@ -34,21 +35,22 @@
 
 void SpanningTreeProtocolInterface::GetServerList(ServerList& sl)
 {
-	for (const auto& [_, server] : Utils->serverlist)
+	for (server_hash::iterator i = Utils->serverlist.begin(); i != Utils->serverlist.end(); i++)
 	{
 		ServerInfo ps;
-		ps.servername = server->GetName();
-		TreeServer* s = server->GetParent();
-		ps.parentname = s ? s->GetName() : "";
-		ps.usercount = server->UserCount;
-		ps.opercount = server->OperCount;
-		ps.description = server->GetDesc();
-		ps.latencyms = server->rtt;
+		TreeServer* tree = i->second;
+		ps.servername = tree->GetName();
+		TreeServer* parent = tree->GetParent();
+		ps.parentname = parent ? parent->GetName() : "";
+		ps.usercount = tree->UserCount;
+		ps.opercount = tree->OperCount;
+		ps.description = tree->GetDesc();
+		ps.latencyms = tree->rtt;
 		sl.push_back(ps);
 	}
 }
 
-bool SpanningTreeProtocolInterface::SendEncapsulatedData(const std::string& targetmask, const std::string& cmd, const CommandBase::Params& params, const User* source)
+bool SpanningTreeProtocolInterface::SendEncapsulatedData(const std::string& targetmask, const std::string& cmd, const CommandBase::Params& params, User* source)
 {
 	if (!source)
 		source = ServerInstance->FakeClient;
@@ -75,43 +77,67 @@ bool SpanningTreeProtocolInterface::SendEncapsulatedData(const std::string& targ
 	return true;
 }
 
-void SpanningTreeProtocolInterface::BroadcastEncap(const std::string& cmd, const CommandBase::Params& params, const User* source, const User* omit)
+void SpanningTreeProtocolInterface::BroadcastEncap(const std::string& cmd, const CommandBase::Params& params, User* source, User* omit)
 {
 	if (!source)
 		source = ServerInstance->FakeClient;
 
 	// If omit is non-NULL we pass the route belonging to the user to Forward(),
 	// otherwise we pass NULL, which is equivalent to Broadcast()
-	TreeServer* server = (omit ? TreeServer::Get(omit)->GetRoute() : nullptr);
+	TreeServer* server = (omit ? TreeServer::Get(omit)->GetRoute() : NULL);
 	CmdBuilder(source, "ENCAP * ").push_raw(cmd).insert(params).Forward(server);
 }
 
-void SpanningTreeProtocolInterface::SendMetadata(const Extensible* ext, const std::string& key, const std::string& data)
+void SpanningTreeProtocolInterface::SendMetaData(User* u, const std::string& key, const std::string& data)
 {
-	CommandMetadata::Builder(ext, key, data).Broadcast();
+	CommandMetadata::Builder(u, key, data).Broadcast();
 }
 
-void SpanningTreeProtocolInterface::SendMetadata(const std::string& key, const std::string& data)
+void SpanningTreeProtocolInterface::SendMetaData(Channel* c, const std::string& key, const std::string& data)
+{
+	CommandMetadata::Builder(c, key, data).Broadcast();
+}
+
+void SpanningTreeProtocolInterface::SendMetaData(const std::string& key, const std::string& data)
 {
 	CommandMetadata::Builder(key, data).Broadcast();
 }
 
-void SpanningTreeProtocolInterface::SendSNONotice(char snomask, const std::string& text)
+void SpanningTreeProtocolInterface::Server::SendMetaData(const std::string& key, const std::string& data)
+{
+	sock->WriteLine(CommandMetadata::Builder(key, data));
+}
+
+void SpanningTreeProtocolInterface::Server::SendMetaData(User* user, const std::string& key, const std::string& data)
+{
+	if (!user)
+		return;
+	sock->WriteLine(CommandMetadata::Builder(user, key, data));
+}
+
+void SpanningTreeProtocolInterface::Server::SendMetaData(Channel* chan, const std::string& key, const std::string& data)
+{
+	if (!chan)
+		return;
+	sock->WriteLine(CommandMetadata::Builder(chan, key, data));
+}
+
+void SpanningTreeProtocolInterface::SendSNONotice(char snomask, const std::string &text)
 {
 	CmdBuilder("SNONOTICE").push(snomask).push_last(text).Broadcast();
 }
 
-void SpanningTreeProtocolInterface::SendMessage(const Channel* target, char status, const std::string& text, MessageType msgtype)
+void SpanningTreeProtocolInterface::SendMessage(Channel* target, char status, const std::string& text, MessageType msgtype)
 {
-	const char* cmd = (msgtype == MessageType::PRIVMSG ? "PRIVMSG" : "NOTICE");
+	const char* cmd = (msgtype == MSG_PRIVMSG ? "PRIVMSG" : "NOTICE");
 	CUList exempt_list;
 	ClientProtocol::TagMap tags;
 	Utils->SendChannelMessage(ServerInstance->FakeClient, target, text, status, tags, exempt_list, cmd);
 }
 
-void SpanningTreeProtocolInterface::SendMessage(const User* target, const std::string& text, MessageType msgtype)
+void SpanningTreeProtocolInterface::SendMessage(User* target, const std::string& text, MessageType msgtype)
 {
-	CmdBuilder p(msgtype == MessageType::PRIVMSG ? "PRIVMSG" : "NOTICE");
+	CmdBuilder p(msgtype == MSG_PRIVMSG ? "PRIVMSG" : "NOTICE");
 	p.push(target->uuid);
 	p.push_last(text);
 	p.Unicast(target);
