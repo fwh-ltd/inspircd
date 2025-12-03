@@ -100,6 +100,36 @@ class EventListener
 
 		/** Remove all keys registered by the specified module. */
 		virtual void UnregisterKeys(Module* owner) = 0;
+
+		/** Set a metadata key on a user.
+		 * @param user The user to set metadata on.
+		 * @param key The metadata key name.
+		 * @param value The value to set.
+		 * @return True if the key was set successfully.
+		 */
+		virtual bool SetKey(User* user, const std::string& key, const std::string& value) = 0;
+
+		/** Set a metadata key on a channel.
+		 * @param chan The channel to set metadata on.
+		 * @param key The metadata key name.
+		 * @param value The value to set.
+		 * @return True if the key was set successfully.
+		 */
+		virtual bool SetKey(Channel* chan, const std::string& key, const std::string& value) = 0;
+
+		/** Unset a metadata key from a user.
+		 * @param user The user to unset metadata from.
+		 * @param key The metadata key name.
+		 * @return True if the key was unset successfully.
+		 */
+		virtual bool UnsetKey(User* user, const std::string& key) = 0;
+
+		/** Unset a metadata key from a channel.
+		 * @param chan The channel to unset metadata from.
+		 * @param key The metadata key name.
+		 * @return True if the key was unset successfully.
+		 */
+		virtual bool UnsetKey(Channel* chan, const std::string& key) = 0;
 	};
 
 class API final

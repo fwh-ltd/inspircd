@@ -1817,6 +1817,104 @@ class ModuleIRCv3Metadata final
 		settings.RemoveKeysOwnedBy(owner);
 	}
 
+	bool SetKey(User* user, const std::string& key, const std::string& value) override
+	{
+		if (!user || key.empty() || !IsValidMetadataKey(key))
+			return false;
+
+		IRCv3::Metadata::Target target;
+		target.ischannel = false;
+		target.user = user;
+		target.name = user->nick;
+
+		MetadataKeyMap* map = store.Get(user, true);
+		IRCv3::Metadata::Entry& entry = (*map)[key];
+		entry.value = value;
+		entry.visibility = settings.defaultvisibility;
+		entry.updated = ServerInstance->Time();
+
+		ServerInstance->PI->SendMetadata(user, key, value);
+		cmd.BroadcastMetadataChange(nullptr, target, key, &entry, false, false);
+		return true;
+	}
+
+	bool SetKey(Channel* chan, const std::string& key, const std::string& value) override
+	{
+		if (!chan || key.empty() || !IsValidMetadataKey(key))
+			return false;
+
+		IRCv3::Metadata::Target target;
+		target.ischannel = true;
+		target.chan = chan;
+		target.name = chan->name;
+
+		MetadataKeyMap* map = store.Get(chan, true);
+		IRCv3::Metadata::Entry& entry = (*map)[key];
+		entry.value = value;
+		entry.visibility = settings.defaultvisibility;
+		entry.updated = ServerInstance->Time();
+
+		ServerInstance->PI->SendMetadata(chan, key, value);
+		cmd.BroadcastMetadataChange(nullptr, target, key, &entry, false, false);
+		return true;
+	}
+
+	bool UnsetKey(User* user, const std::string& key) override
+	{
+		if (!user || key.empty())
+			return false;
+
+		MetadataKeyMap* map = store.Get(user, false);
+		if (!map)
+			return false;
+
+		MetadataKeyMap::iterator it = map->find(key);
+		if (it == map->end())
+			return false;
+
+		IRCv3::Metadata::Target target;
+		target.ischannel = false;
+		target.user = user;
+		target.name = user->nick;
+
+		IRCv3::Metadata::Entry removed = it->second;
+		map->erase(it);
+		store.MaybeUnset(user);
+
+		ServerInstance->PI->SendMetadata(user, key, "");
+		removed.value.clear();
+		cmd.BroadcastMetadataChange(nullptr, target, key, &removed, false, true);
+		return true;
+	}
+
+	bool UnsetKey(Channel* chan, const std::string& key) override
+	{
+		if (!chan || key.empty())
+			return false;
+
+		MetadataKeyMap* map = store.Get(chan, false);
+		if (!map)
+			return false;
+
+		MetadataKeyMap::iterator it = map->find(key);
+		if (it == map->end())
+			return false;
+
+		IRCv3::Metadata::Target target;
+		target.ischannel = true;
+		target.chan = chan;
+		target.name = chan->name;
+
+		IRCv3::Metadata::Entry removed = it->second;
+		map->erase(it);
+		store.MaybeUnset(chan);
+
+		ServerInstance->PI->SendMetadata(chan, key, "");
+		removed.value.clear();
+		cmd.BroadcastMetadataChange(nullptr, target, key, &removed, false, true);
+		return true;
+	}
+
 	void OnUnloadModule(Module* mod) override
 	{
 		settings.RemoveKeysOwnedBy(mod);
