@@ -1,0 +1,104 @@
+/*
+ * InspIRCd -- Internet Relay Chat Daemon
+ *
+ *   Copyright (C) 2024 RelayOS
+ *
+ * This file is part of InspIRCd.  InspIRCd is free software: you can
+ * redistribute it and/or modify it under the terms of the GNU General Public
+ * License as published by the Free Software Foundation, version 2.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ * details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/// $ModAuthor: RelayOS
+/// $ModDesc: Sets IRCv3 metadata from WEBIRC flags.
+/// $ModDepends: core 4
+
+#include "inspircd.h"
+#include "modules/ircv3_metadata.h"
+#include "modules/webirc.h"
+
+class ModuleWebIRCMetadata final
+	: public Module
+	, public WebIRC::EventListener
+{
+private:
+	IRCv3::Metadata::API metaapi;
+	std::vector<std::string> keys;
+
+public:
+	ModuleWebIRCMetadata()
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Sets IRCv3 metadata keys from WEBIRC flags.")
+		, WebIRC::EventListener(this)
+		, metaapi(this)
+	{
+	}
+
+	void ReadConfig(ConfigStatus& status) override
+	{
+		std::vector<std::string> newkeys;
+
+		for (const auto& [_, tag] : ServerInstance->Config->ConfTags("webircmeta"))
+		{
+			const std::string key = tag->getString("key");
+			if (key.empty())
+				throw ModuleException(this, "<webircmeta:key> is a mandatory field, at " + tag->source.str());
+
+			newkeys.push_back(key);
+		}
+
+		keys.swap(newkeys);
+	}
+
+	void init() override
+	{
+		if (!metaapi)
+		{
+			ServerInstance->Logs.Warning(MODNAME, "The ircv3_metadata module must be loaded for this module to work.");
+			return;
+		}
+
+		for (const auto& key : keys)
+		{
+			IRCv3::Metadata::KeySpec spec;
+			spec.name = key;
+			spec.targets = IRCv3::Metadata::TARGET_USER;
+			spec.servicesonly = true;
+			metaapi->RegisterKey(this, spec);
+		}
+	}
+
+	void OnWebIRCAuth(LocalUser* user, const WebIRC::FlagMap* flags) override
+	{
+		if (!flags || !metaapi)
+			return;
+
+		for (const auto& key : keys)
+		{
+			auto it = flags->find(key);
+			if (it != flags->end() && !it->second.empty())
+			{
+				metaapi->SetKey(user, key, it->second);
+				ServerInstance->Logs.Debug(MODNAME, "Set metadata {}={} for user {}",
+					key, it->second, user->uuid);
+			}
+		}
+	}
+
+	void OnUserDisconnect(LocalUser* user) override
+	{
+		if (!metaapi)
+			return;
+
+		for (const auto& key : keys)
+			metaapi->UnsetKey(user, key);
+	}
+};
+
+MODULE_INIT(ModuleWebIRCMetadata)
